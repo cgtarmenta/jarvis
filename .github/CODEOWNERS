@@ -1,0 +1,5 @@
+# Default owner for everything in the repo.
+*       @tadeoarmenta
+
+# Areas with their own primary maintainer go here as the project grows.
+# /src/jarvis/agents/   @someone-else

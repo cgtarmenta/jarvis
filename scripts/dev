@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# Developer entry point for the Jarvis Rust workspace.
+#
+# This wraps cargo with the same UX the Python prototype had:
+#
+#   ./scripts/dev install   — check toolchain, fetch deps, build debug
+#   ./scripts/dev run [...] — cargo run -- <args>  (forwards everything)
+#   ./scripts/dev doctor    — release build + jarvis doctor
+#   ./scripts/dev test      — fmt --check + clippy + cargo test
+#   ./scripts/dev lint      — cargo fmt + clippy --fix
+#   ./scripts/dev build     — cargo build --release; reports the binary size
+#   ./scripts/dev clean     — cargo clean
+#   ./scripts/dev help      — this message
+
+set -euo pipefail
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${PROJECT_ROOT}"
+
+c_bold='\033[1m'; c_dim='\033[2m'; c_green='\033[32m'; c_red='\033[31m'; c_reset='\033[0m'
+say()  { printf "${c_green}==>${c_reset} %s\n" "$*"; }
+warn() { printf "${c_red}!!${c_reset}  %s\n" "$*" >&2; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+ensure_toolchain() {
+    if ! have cargo; then
+        warn "cargo not found. Install Rust via https://rustup.rs or your package manager:"
+        warn "  Arch:  sudo pacman -S rustup && rustup default stable"
+        warn "  macOS: brew install rustup-init && rustup-init"
+        exit 1
+    fi
+    say "Using $(cargo --version)"
+}
+
+cmd_install() {
+    ensure_toolchain
+    say "Fetching dependencies"
+    cargo fetch
+    say "Initial debug build"
+    cargo build
+    say "Done. Try: ./scripts/dev doctor"
+}
+
+cmd_run() {
+    ensure_toolchain
+    cargo run -- "$@"
+}
+
+cmd_doctor() {
+    ensure_toolchain
+    cargo build --release
+    "${PROJECT_ROOT}/target/release/jarvis" doctor
+}
+
+cmd_test() {
+    ensure_toolchain
+    say "Format check"
+    cargo fmt --all -- --check
+    say "Clippy"
+    cargo clippy --all-targets --all-features -- -D warnings
+    say "Tests"
+    cargo test --all-features "$@"
+}
+
+cmd_lint() {
+    ensure_toolchain
+    say "cargo fmt"
+    cargo fmt --all
+    say "cargo clippy --fix"
+    cargo clippy --fix --all-targets --allow-dirty --allow-staged
+}
+
+cmd_build() {
+    ensure_toolchain
+    say "Release build"
+    cargo build --release
+    say "Binary:"
+    ls -lh "${PROJECT_ROOT}/target/release/jarvis"
+}
+
+cmd_clean() {
+    cargo clean
+}
+
+cmd_help() {
+    cat <<EOF
+${c_bold}Jarvis dev runner (Rust)${c_reset}
+
+Usage: ./scripts/dev <command> [args]
+
+Commands:
+  install    Check toolchain, fetch deps, debug build
+  run [...]  cargo run -- <args>  (forwards args to jarvis)
+  doctor     cargo build --release && jarvis doctor
+  test       cargo fmt --check + clippy + cargo test
+  lint       cargo fmt + clippy --fix
+  build      cargo build --release; print binary size
+  clean      cargo clean
+  help       Show this message
+
+Quick start:
+
+  ./scripts/dev install
+  ./scripts/dev doctor
+  ./scripts/dev run listen
+EOF
+}
+
+main() {
+    local cmd="${1:-help}"
+    shift || true
+    case "${cmd}" in
+        install) cmd_install "$@" ;;
+        run)     cmd_run "$@" ;;
+        doctor)  cmd_doctor "$@" ;;
+        test)    cmd_test "$@" ;;
+        lint)    cmd_lint "$@" ;;
+        build)   cmd_build "$@" ;;
+        clean)   cmd_clean "$@" ;;
+        help|-h|--help) cmd_help ;;
+        *)
+            warn "Unknown command: ${cmd}"
+            cmd_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

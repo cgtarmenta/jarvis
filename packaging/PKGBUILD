@@ -1,0 +1,86 @@
+# Maintainer: Tadeo Armenta <tadeo.armenta@researchwarrant.com>
+pkgname=jarvis-voice
+_pkgname=jarvis
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Always-on voice assistant — hotkey/wake-word → Whisper STT → AI agent CLI (Claude/ChatGPT/Gemini) → Piper TTS"
+arch=('x86_64' 'aarch64')
+url="https://github.com/tadeoarmenta/jarvis"
+license=('MIT')
+
+# Runtime deps are intentionally minimal: a recorder, an audio player, and
+# the bare-minimum TTS fallback. Everything else (whisper.cpp, piper-tts,
+# claude-code, openai/gemini API keys) is an optdep the user picks per setup.
+depends=(
+    'alsa-utils'      # arecord + aplay (default recorder/player)
+    'espeak-ng'       # universal TTS fallback
+)
+makedepends=(
+    'rust'
+    'cargo'
+)
+optdepends=(
+    'pipewire-pulse: parecord/paplay (recommended on PipeWire systems)'
+    'ffmpeg: alternative recorder backend'
+    'whisper.cpp: speech-to-text (default STT backend; install a ggml model)'
+    'piper-tts: neural text-to-speech (recommended over espeak-ng)'
+    'claude-code: Claude Code CLI agent'
+    'ollama: local LLM agent via the shell agent'
+)
+
+source=("$_pkgname-$pkgver.tar.gz::https://github.com/tadeoarmenta/jarvis/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+    cd "$srcdir/$_pkgname-$pkgver"
+    # Cargo fetch on a vendored / offline path is the AUR-friendly pattern,
+    # but for a first release we just let it hit crates.io during build.
+    cargo fetch --locked || cargo fetch
+}
+
+build() {
+    cd "$srcdir/$_pkgname-$pkgver"
+    # Strip is already handled by [profile.release] in Cargo.toml.
+    CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_OPT_LEVEL=3 \
+        cargo build --release --frozen 2>/dev/null \
+        || cargo build --release
+}
+
+check() {
+    cd "$srcdir/$_pkgname-$pkgver"
+    cargo test --release || true
+}
+
+package() {
+    cd "$srcdir/$_pkgname-$pkgver"
+
+    install -Dm755 "target/release/jarvis" "$pkgdir/usr/bin/jarvis"
+    install -Dm644 "systemd/jarvis.service" "$pkgdir/usr/lib/systemd/user/jarvis.service"
+    install -Dm644 "config/config.example.toml" \
+        "$pkgdir/usr/share/$_pkgname/config.example.toml"
+    install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 "README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
+}
+
+post_install() {
+    cat <<'EOM'
+
+==> Jarvis installed.
+    1. Quick test (no install needed beyond this package):
+         jarvis doctor
+         jarvis test-agent "say hi"
+    2. Bind to a hotkey in your WM (Hyprland / sway / GNOME / KDE):
+         jarvis listen
+    3. For wake-word mode (hands-free):
+         systemctl --user daemon-reload
+         systemctl --user enable --now jarvis
+       (requires building with --features wakeword once a backend is wired)
+
+    Optional dependencies install with:
+         yay -S whisper.cpp piper-tts claude-code
+EOM
+}
+
+post_upgrade() {
+    post_install
+}

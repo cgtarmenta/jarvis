@@ -1,0 +1,18 @@
+//! Jarvis — voice assistant orchestrator.
+//!
+//! The library half of the crate exposes the building blocks (`config`,
+//! `recorder`, `stt`, `tts`, `agents`, `pipeline`, `daemon`) so integration
+//! tests and future GUI front-ends can call them directly without spawning
+//! the CLI binary.
+
+pub mod agents;
+pub mod cli;
+pub mod config;
+pub mod daemon;
+pub mod pipeline;
+pub mod recorder;
+pub mod stt;
+pub mod tts;
+pub mod wake;
+
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");

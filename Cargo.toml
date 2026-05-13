@@ -1,0 +1,78 @@
+[package]
+name = "jarvis-voice"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Always-on voice assistant that glues a wake word / hotkey to any AI agent CLI (Claude Code, ChatGPT, Gemini, ...) via existing STT/TTS binaries."
+authors = ["Tadeo Armenta <tadeo.armenta@researchwarrant.com>"]
+license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/tadeoarmenta/jarvis"
+repository = "https://github.com/tadeoarmenta/jarvis"
+keywords = ["voice-assistant", "whisper", "piper", "claude", "linux"]
+categories = ["command-line-utilities", "multimedia::audio"]
+
+[[bin]]
+name = "jarvis"
+path = "src/main.rs"
+
+[lib]
+name = "jarvis"
+path = "src/lib.rs"
+
+[dependencies]
+# CLI parsing — derive feature lets us mirror Python's click ergonomics.
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Config: TOML in, struct out.
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+
+# Cross-platform XDG / Library paths. ``directories`` works on Linux, macOS,
+# and BSD; this is the multi-Unix lifeline.
+directories = "5.0"
+
+# Structured logging with env-var control. ``tracing-subscriber`` formats
+# nicely for journalctl and for terminals.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Error handling: anyhow for the binary / CLI surface, thiserror for typed
+# library errors.
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Looking up binaries on PATH for ``jarvis doctor``.
+which = "6.0"
+
+# SIGINT/SIGTERM handling for the daemon.
+signal-hook = "0.3"
+
+# Tempfile for WAV captures.
+tempfile = "3.10"
+
+# HTTP for piper voice download and the OpenAI / Gemini agents.
+ureq = { version = "2.10", features = ["tls", "json"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+# Black-box CLI testing.
+assert_cmd = "2.0"
+predicates = "3.1"
+# Override env / XDG dirs in tests.
+serial_test = "3.1"
+
+[features]
+default = []
+# Enable wake-word triggering. Pulls in an ONNX runtime; not needed for the
+# hotkey-driven flow.
+wakeword = []
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+opt-level = 3
+
+[profile.dev]
+opt-level = 0

@@ -1,0 +1,20 @@
+[Unit]
+Description=Jarvis voice assistant daemon
+Documentation=https://github.com/tadeoarmenta/jarvis
+After=pipewire.service pulseaudio.service sound.target graphical-session.target
+Wants=pipewire.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/jarvis-daemon
+Restart=on-failure
+RestartSec=3
+# Voice models and audio buffers can briefly spike memory; cap so a runaway
+# process doesn't OOM the desktop session.
+MemoryMax=2G
+
+# Pass through the API keys most users put in their shell profile.
+PassEnvironment=OPENAI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY ANTHROPIC_API_KEY
+
+[Install]
+WantedBy=default.target

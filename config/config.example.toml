@@ -1,0 +1,109 @@
+# ============================================================================
+#  Jarvis configuration
+#  Location:
+#    Linux/BSD:  $XDG_CONFIG_HOME/jarvis/config.toml  (~/.config/jarvis/config.toml)
+#    macOS:      ~/Library/Application Support/jarvis/config.toml
+#  Edit and then:  systemctl --user restart jarvis   (or just rerun `jarvis listen`)
+# ============================================================================
+
+log_level       = "INFO"     # error | warn | info | debug | trace
+speak_responses = true       # set false to print replies only (no TTS)
+
+# ----------------------------------------------------------------------------
+#  Wake word (optional, hands-free trigger)
+# ----------------------------------------------------------------------------
+# Hotkey-driven is the default: bind `jarvis listen` to a global hotkey in
+# your WM (Hyprland, sway, GNOME, macOS Shortcuts, ...). Set enabled = true
+# only if you want the always-listening mode.
+[wake]
+enabled          = false
+model            = "hey_jarvis"
+threshold        = 0.5
+cooldown_seconds = 2.0
+sample_rate      = 16000
+# input_device   = "default"
+
+# ----------------------------------------------------------------------------
+#  Recorder (captures audio to a WAV for the STT backend)
+# ----------------------------------------------------------------------------
+# backend = "auto" picks the first of parecord / pw-record / arecord / ffmpeg
+# found on PATH. Override for a specific recorder.
+[record]
+backend         = "auto"
+# device        = "default"
+sample_rate     = 16000
+channels        = 1
+max_seconds     = 15.0
+silence_seconds = 1.5
+# command         = ["arecord", "-r", "16000", "-f", "S16_LE", "{out}"]
+
+# ----------------------------------------------------------------------------
+#  Speech to text — shells out to a transcription binary, no inference here
+# ----------------------------------------------------------------------------
+# Default: whisper-cli (from whisper.cpp). Install with:
+#   Arch:  pacman -S whisper.cpp
+#   macOS: brew install whisper-cpp
+# Download a ggml model (e.g. base.en) and point `model` at it.
+[stt]
+backend    = "whisper-cli"
+binary     = "whisper-cli"
+model      = "/usr/share/whisper.cpp/models/ggml-base.en.bin"
+language   = "en"
+threads    = 4
+extra_args = []
+# For any other tool, switch to backend = "command" and set:
+# command = ["my-transcribe", "--input", "{wav}"]
+
+# ----------------------------------------------------------------------------
+#  Text to speech — also subprocess-based
+# ----------------------------------------------------------------------------
+# Piper voices auto-download to ~/.local/share/jarvis/piper/ on first use.
+# Browse voices: https://huggingface.co/rhasspy/piper-voices
+#
+# IMPORTANT (Arch): the package in the official repo named `piper` is a GTK
+# app for gaming mice, NOT the TTS. You want `piper-tts` from the AUR:
+#   yay -S piper-tts
+# If `piper-tts` installs the binary under a different name, set
+# `piper_binary` accordingly. If you don't want to bother, set
+# `backend = "espeak"` (universal but robotic) or `backend = "none"` to
+# print replies instead of speaking them.
+[tts]
+backend          = "piper"            # piper | espeak | command | none
+voice            = "en_US-lessac-medium"
+piper_binary     = "piper"
+# piper_model_path = "/path/to/voice.onnx"
+espeak_voice     = "en"
+rate             = 175
+# command          = ["my-tts", "--text", "{text}"]
+
+# ----------------------------------------------------------------------------
+#  Agent — the AI CLI we send transcripts to and get replies from
+# ----------------------------------------------------------------------------
+# Built-ins: claude | openai | gemini | shell
+# Plugin model: any binary or script that reads the prompt on stdin and
+# writes the reply on stdout. Set `name = "shell"` and `command = [...]`
+# to use it; that's how Ollama, Warp's CLI, or AI-generated plugins plug in.
+
+[agent]
+name = "claude"
+# binary       = "claude"
+# cwd          = "/home/you/projects"
+# timeout      = 60
+# system_prompt = "You are a voice assistant. Reply in 1-3 sentences."
+# extra_args   = ["--model", "claude-opus-4-7"]
+
+# ---- OpenAI / ChatGPT ------------------------------------------------------
+# name        = "openai"
+# model       = "gpt-4o-mini"
+# temperature = 0.6
+# Expects OPENAI_API_KEY in the environment.
+
+# ---- Gemini ----------------------------------------------------------------
+# name  = "gemini"
+# model = "gemini-1.5-flash"
+# Expects GEMINI_API_KEY (or GOOGLE_API_KEY).
+
+# ---- Shell (Ollama, custom script, agent-generated plugin) -----------------
+# name    = "shell"
+# command = ["ollama", "run", "llama3"]
+# timeout = 60

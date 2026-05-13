@@ -1,0 +1,83 @@
+name: Bug report
+description: Something is broken in Jarvis
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug! Please fill in as much of
+        the template as you can — partial reports are still welcome.
+
+  - type: input
+    id: version
+    attributes:
+      label: Jarvis version
+      description: Output of `jarvis --version`
+      placeholder: "jarvis, 0.1.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: Install method
+      options:
+        - AUR (jarvis-voice)
+        - pip / source checkout
+        - other (describe below)
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `jarvis doctor`
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Minimal commands or scenario that triggers the bug
+      placeholder: |
+        1. systemctl --user start jarvis
+        2. say "hey jarvis"
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        `journalctl --user -u jarvis -n 200 --no-pager`
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, kernel, audio stack (PipeWire / PulseAudio), Python version
+      placeholder: |
+        Arch Linux 6.9.0, PipeWire 1.0.5, Python 3.12.3
+    validations:
+      required: true

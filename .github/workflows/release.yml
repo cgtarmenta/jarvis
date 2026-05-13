@@ -1,0 +1,139 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-alpha.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-beta.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release (e.g. v0.2.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  classify:
+    name: Classify tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.set.outputs.tag }}
+      version: ${{ steps.set.outputs.version }}
+      is_prerelease: ${{ steps.set.outputs.is_prerelease }}
+    steps:
+      - id: set
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          version="${tag#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$tag" == *-* ]]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: classify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: jarvis-${{ needs.classify.outputs.version }}-x86_64-linux.tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: jarvis-${{ needs.classify.outputs.version }}-aarch64-linux.tar.gz
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: jarvis-${{ needs.classify.outputs.version }}-x86_64-macos.tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: jarvis-${{ needs.classify.outputs.version }}-aarch64-macos.tar.gz
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.classify.outputs.tag }}
+
+      - name: Verify Cargo.toml version matches tag
+        run: |
+          want="${{ needs.classify.outputs.version }}"
+          # Strip prerelease suffix for the comparison; Cargo.toml is the
+          # numeric MAJOR.MINOR.PATCH only.
+          want="${want%%-*}"
+          got=$(grep -E '^version' Cargo.toml | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
+          if [[ "$want" != "$got" ]]; then
+            echo "::error::Cargo.toml version ($got) != tag ($want)"
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross (linux aarch64)
+        if: matrix.cross == true
+        run: cargo install cross --locked
+
+      - name: Build
+        run: |
+          if [[ "${{ matrix.cross }}" == "true" ]]; then
+            cross build --release --target ${{ matrix.target }} --locked
+          else
+            cargo build --release --target ${{ matrix.target }} --locked
+          fi
+
+      - name: Stage artifact
+        run: |
+          mkdir -p dist
+          tar -czf "dist/${{ matrix.archive }}" \
+            -C "target/${{ matrix.target }}/release" jarvis \
+            -C "${GITHUB_WORKSPACE}" LICENSE README.md \
+            -C "${GITHUB_WORKSPACE}/config" config.example.toml \
+            -C "${GITHUB_WORKSPACE}/systemd" jarvis.service
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: dist/${{ matrix.archive }}
+
+  github-release:
+    name: Publish GitHub release
+    runs-on: ubuntu-latest
+    needs: [classify, build]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Compute SHA-256 checksums
+        run: |
+          cd artifacts
+          sha256sum *.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.classify.outputs.tag }}
+          name: ${{ needs.classify.outputs.tag }}
+          generate_release_notes: true
+          prerelease: ${{ needs.classify.outputs.is_prerelease == 'true' }}
+          files: |
+            artifacts/*.tar.gz
+            artifacts/SHA256SUMS.txt

@@ -1,0 +1,16 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# AUR build artifacts
+packaging/pkg/
+packaging/src/
+packaging/*.tar.gz
+packaging/*.tar.zst
+packaging/*.pkg.tar*
+
+# Editors
+.vscode/
+.idea/
+*.swp
+.DS_Store
