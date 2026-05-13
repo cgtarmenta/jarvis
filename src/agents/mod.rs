@@ -15,11 +15,13 @@ mod claude;
 mod gemini;
 mod openai;
 mod shell;
+mod warp;
 
 pub use claude::ClaudeAgent;
 pub use gemini::GeminiAgent;
 pub use openai::OpenAiAgent;
 pub use shell::ShellAgent;
+pub use warp::WarpAgent;
 
 pub trait Agent {
     fn name(&self) -> &'static str;
@@ -33,9 +35,10 @@ pub fn build(cfg: AgentConfig) -> Result<Box<dyn Agent + Send + Sync>> {
         "claude" | "claude-code" => Ok(Box::new(ClaudeAgent::from_options(cfg.options)?)),
         "openai" | "chatgpt" => Ok(Box::new(OpenAiAgent::from_options(cfg.options)?)),
         "gemini" | "google" => Ok(Box::new(GeminiAgent::from_options(cfg.options)?)),
+        "warp" | "oz" => Ok(Box::new(WarpAgent::from_options(cfg.options)?)),
         "shell" => Ok(Box::new(ShellAgent::from_options(cfg.options)?)),
         other => Err(anyhow!(
-            "unknown agent: {other:?}. Built-ins: claude, openai, gemini, shell. \
+            "unknown agent: {other:?}. Built-ins: claude, openai, gemini, warp, shell. \
              Use the shell agent to wire any custom CLI."
         )),
     }
