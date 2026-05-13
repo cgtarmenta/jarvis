@@ -84,6 +84,15 @@ enum Cmd {
         cmd: SessionCmd,
     },
 
+    /// Spec-driven development: manage specs in `specs/` (inbox / active /
+    /// shipped / rejected). The voice-driven shortcuts ("open a spec
+    /// for X", "promote 14") go through `jarvis listen` / `jarvis daemon`
+    /// — these subcommands give you the same operations from a terminal.
+    Spec {
+        #[command(subcommand)]
+        cmd: SpecCmd,
+    },
+
     /// Diagnostic: run the configured wake backend for N seconds with
     /// verbose logging (RMS readings, transcripts, match status). Use this
     /// to tune `[wake].vad_rms_threshold` and `[wake].phrases` without
@@ -113,6 +122,40 @@ enum SessionCmd {
     Path,
 }
 
+#[derive(Subcommand, Debug)]
+enum SpecCmd {
+    /// Create a new spec in `specs/inbox/` with the given title.
+    New {
+        /// Free-text title. Joined with spaces if multiple words.
+        #[arg(num_args = 1..)]
+        title: Vec<String>,
+    },
+    /// Print every spec grouped by status.
+    List {
+        /// Filter to a single status: inbox | active | shipped | rejected.
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Print one spec by numeric id or slug fragment.
+    Show { query: String },
+    /// Move an inbox spec to active/, assigning the next sequential id.
+    Promote { query: String },
+    /// Move an active spec to shipped/. Requires every `## What` bullet
+    /// to be checked.
+    Ship { query: String },
+    /// Move a spec to rejected/. Reason is recorded in the body.
+    Reject {
+        query: String,
+        /// Why the spec was rejected. Joined with spaces.
+        #[arg(num_args = 1..)]
+        reason: Vec<String>,
+    },
+    /// Print the `specs/` directory path.
+    Path,
+    /// Open the spec file in $EDITOR.
+    Edit { query: String },
+}
+
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     // Logging filter: CLI flag > $JARVIS_LOG > config value.
@@ -138,6 +181,7 @@ pub fn run() -> Result<()> {
         Cmd::TestStt { seconds } => cmd_test_stt(&cfg, seconds),
         Cmd::TestAgent { prompt } => cmd_test_agent(&cfg, &prompt.join(" ")),
         Cmd::Session { cmd } => cmd_session(cmd),
+        Cmd::Spec { cmd } => cmd_spec(cmd),
         Cmd::TestWake {
             seconds,
             threshold,
@@ -514,4 +558,128 @@ fn cmd_session(cmd: SessionCmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn cmd_spec(cmd: SpecCmd) -> Result<()> {
+    use crate::specs::{Status, store};
+
+    let specs_dir = store::find_specs_dir_from_cwd()
+        .context("locating specs/ — run from a jarvis-style repo, or create specs/ first")?;
+
+    match cmd {
+        SpecCmd::Path => {
+            println!("{}", specs_dir.display());
+        }
+        SpecCmd::New { title } => {
+            let title = title.join(" ");
+            let s = store::create_inbox(&specs_dir, &title)?;
+            println!("✓ created {}", s.path.display());
+        }
+        SpecCmd::List { status } => {
+            let filter = match status.as_deref() {
+                Some(s) => Some(Status::parse(s).ok_or_else(|| anyhow!("unknown status {s:?}"))?),
+                None => None,
+            };
+            let mut all = store::list_all(&specs_dir)?;
+            // Stable display order: inbox, active, shipped, rejected; then
+            // by id ascending (with un-IDed inbox specs sorted by filename).
+            all.sort_by(|a, b| {
+                let sa = a.frontmatter.status.unwrap_or(Status::Inbox);
+                let sb = b.frontmatter.status.unwrap_or(Status::Inbox);
+                let order = |s: Status| match s {
+                    Status::Inbox => 0,
+                    Status::Active => 1,
+                    Status::Shipped => 2,
+                    Status::Rejected => 3,
+                    Status::Private => 4,
+                };
+                order(sa).cmp(&order(sb)).then(
+                    a.frontmatter
+                        .id
+                        .unwrap_or(0)
+                        .cmp(&b.frontmatter.id.unwrap_or(0))
+                        .then_with(|| a.path.cmp(&b.path)),
+                )
+            });
+            if all.is_empty() {
+                println!("No specs found in {}.", specs_dir.display());
+                return Ok(());
+            }
+            print_spec_table(&all, filter);
+        }
+        SpecCmd::Show { query } => {
+            let s = store::find(&specs_dir, &query)?
+                .ok_or_else(|| anyhow!("no spec matches {query:?}"))?;
+            print_spec_detail(&s);
+        }
+        SpecCmd::Promote { query } => {
+            let s = store::find(&specs_dir, &query)?
+                .ok_or_else(|| anyhow!("no spec matches {query:?}"))?;
+            let promoted = store::promote(&specs_dir, &s)?;
+            println!(
+                "✓ promoted {:04} {}",
+                promoted.frontmatter.id.unwrap_or(0),
+                promoted.path.display()
+            );
+        }
+        SpecCmd::Ship { query } => {
+            let s = store::find(&specs_dir, &query)?
+                .ok_or_else(|| anyhow!("no spec matches {query:?}"))?;
+            let shipped = store::ship(&specs_dir, &s)?;
+            println!("✓ shipped {}", shipped.path.display());
+        }
+        SpecCmd::Reject { query, reason } => {
+            let s = store::find(&specs_dir, &query)?
+                .ok_or_else(|| anyhow!("no spec matches {query:?}"))?;
+            let reason = reason.join(" ");
+            if reason.trim().is_empty() {
+                return Err(anyhow!(
+                    "rejecting a spec requires a reason — `jarvis spec reject <id> <reason>`"
+                ));
+            }
+            let rejected = store::reject(&specs_dir, &s, &reason)?;
+            println!("✓ rejected {}", rejected.path.display());
+        }
+        SpecCmd::Edit { query } => {
+            let s = store::find(&specs_dir, &query)?
+                .ok_or_else(|| anyhow!("no spec matches {query:?}"))?;
+            let editor = env::var("EDITOR").unwrap_or_else(|_| "nano".into());
+            std::process::Command::new(&editor)
+                .arg(&s.path)
+                .status()
+                .with_context(|| format!("running editor: {editor}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn print_spec_table(all: &[crate::specs::spec::Spec], filter: Option<crate::specs::Status>) {
+    use crate::specs::Status;
+    let mut current: Option<Status> = None;
+    for s in all {
+        let st = s.frontmatter.status.unwrap_or(Status::Inbox);
+        if let Some(want) = filter
+            && want != st
+        {
+            continue;
+        }
+        if current != Some(st) {
+            current = Some(st);
+            println!();
+            println!("[{}]", st.dir());
+        }
+        let id = s
+            .frontmatter
+            .id
+            .map(|n| format!("{n:04}"))
+            .unwrap_or_else(|| "    ".to_string());
+        let name = s.path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+        println!("  {id}  {name}  — {}", s.frontmatter.title);
+    }
+}
+
+fn print_spec_detail(s: &crate::specs::spec::Spec) {
+    println!("{}", s.path.display());
+    println!();
+    println!("{}", s.serialize());
 }

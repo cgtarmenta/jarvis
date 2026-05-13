@@ -68,6 +68,21 @@ pub fn run_once(cfg: &JarvisConfig) -> Result<Option<String>> {
             return Ok(Some(String::from("Session reset.")));
         }
 
+        // Spec-management intent: "abre un spec para X", "promote 14",
+        // etc. These are handled deterministically — never forwarded to
+        // the agent because filesystem mutations should not be the LLM's
+        // job. The handler returns a short TTS-friendly summary.
+        if let Some(intent) = crate::specs::recognize(&prompt) {
+            info!(?intent, "spec intent recognised");
+            let reply = crate::specs::execute(intent);
+            if let Some(tts) = &tts_engine
+                && !reply.is_empty()
+            {
+                tts.speak(&reply)?;
+            }
+            return Ok(Some(reply));
+        }
+
         // Load (or implicitly create) the active session. Truncate before
         // sending so we don't blow the model's context window — keeping
         // only the most recent `max_turns` turns.

@@ -13,6 +13,7 @@ pub mod pipeline;
 pub mod recorder;
 pub mod session;
 pub mod setup;
+pub mod specs;
 pub mod stt;
 pub mod tts;
 pub mod wake;
