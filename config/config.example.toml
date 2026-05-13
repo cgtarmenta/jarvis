@@ -35,10 +35,14 @@ speak_responses = true       # set false to print replies only (no TTS)
 enabled           = false
 backend           = "none"
 phrases           = ["jarvis"]
-vad_rms_threshold = 0.03    # 0.02 catches whispers; 0.08 ignores soft talk
+vad_rms_threshold = 0.02    # 0.015 catches whispers; 0.05 ignores soft talk
 silence_seconds   = 0.8     # trailing silence that ends an utterance
 max_listen_seconds = 3.0    # cap on one utterance before forced transcribe
 cooldown_seconds  = 2.0
+# Optional: use a smaller/faster Whisper model for the always-on wake loop
+# while [stt].model stays a heavier one for the actual command. Recommended
+# pairing: stt.model = large-v3 + wake.stt_model_override = base/tiny.
+# stt_model_override = "/home/you/.local/share/jarvis/whisper/ggml-base.bin"
 
 # ----------------------------------------------------------------------------
 #  Recorder (captures audio to a WAV for the STT backend)

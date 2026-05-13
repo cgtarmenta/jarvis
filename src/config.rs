@@ -100,6 +100,11 @@ pub struct WakeConfig {
     /// Backwards-compat / future use. CUDA / Vulkan / Metal kick in via the
     /// main STT config; this is reserved for backend-specific tuning later.
     pub cooldown_seconds: f32,
+    /// Override the path of the Whisper ggml model used by the wake loop.
+    /// Lets you pair a heavy main STT model (large-v3, 3 GB) with a tiny
+    /// wake model (base or tiny, ~100 MB) so the always-on loop stays
+    /// fast and light. Leave `None` to reuse `stt.model`.
+    pub stt_model_override: Option<String>,
 }
 
 impl Default for WakeConfig {
@@ -108,10 +113,14 @@ impl Default for WakeConfig {
             enabled: false,
             backend: "none".into(),
             phrases: vec!["jarvis".into()],
-            vad_rms_threshold: 0.03,
+            // 0.02 RMS is forgiving: catches normal-volume speech at desk
+            // distance without firing on typing/HVAC noise. The old 0.03
+            // default required users to almost-shout into the mic.
+            vad_rms_threshold: 0.02,
             silence_seconds: 0.8,
             max_listen_seconds: 3.0,
             cooldown_seconds: 2.0,
+            stt_model_override: None,
         }
     }
 }

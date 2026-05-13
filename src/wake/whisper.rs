@@ -18,7 +18,7 @@ use std::io::Read;
 use std::process::{Child, Command, Stdio};
 
 use anyhow::{Context, Result, anyhow};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use super::WakeBackend;
 use crate::config::{SttConfig, WakeConfig};
@@ -43,17 +43,25 @@ pub struct WhisperWake {
 }
 
 impl WhisperWake {
-    pub fn new(cfg: WakeConfig, stt_cfg: SttConfig) -> Result<Self> {
+    pub fn new(cfg: WakeConfig, mut stt_cfg: SttConfig) -> Result<Self> {
         if cfg.phrases.is_empty() {
             return Err(anyhow!(
                 "wake backend = \"whisper\" requires [wake].phrases to be non-empty (e.g. phrases = [\"jarvis\", \"mutombo\"])"
             ));
         }
 
-        // Use the user's STT config (model path, binary, threads, GPU
-        // flags) for the wake transcription. A future iteration may add a
-        // `[wake].stt_model` override so users can run a tiny model in the
-        // always-on loop and keep large-v3 for the main listen flow.
+        // Honour `[wake].stt_model_override` so the always-on loop can use
+        // a small/fast model (tiny, base) while the main `jarvis listen`
+        // path keeps a heavier model (small, medium, large-v3) for the
+        // actual command.
+        if let Some(override_path) = &cfg.stt_model_override {
+            info!(
+                wake_model = %override_path,
+                main_model = %stt_cfg.model,
+                "wake-loop using model override (decoupled from main STT)"
+            );
+            stt_cfg.model = override_path.clone();
+        }
         let stt = WhisperCli::new(stt_cfg);
 
         let phrases_normalised = cfg
@@ -98,6 +106,14 @@ impl WakeBackend for WhisperWake {
         let silence_chunks_threshold = ((self.cfg.silence_seconds * 1000.0) as usize) / 100; // 100ms per chunk
         let mut silence_run = 0usize;
         let mut in_speech = false;
+        let mut speech_start_chunks = 0usize;
+
+        // Observability: every ALIVE_REPORT_CHUNKS we print a status line
+        // showing the peak RMS observed in that window. Lets the user
+        // calibrate `vad_rms_threshold` against their actual mic levels.
+        const ALIVE_REPORT_CHUNKS: usize = 100; // 10 s at 100 ms/chunk
+        let mut chunks_since_report = 0usize;
+        let mut peak_rms_window: f32 = 0.0;
 
         let result: Result<()> = (|| {
             loop {
@@ -115,14 +131,36 @@ impl WakeBackend for WhisperWake {
                 let rms = compute_rms(&chunk_bytes);
                 let speaking = rms >= self.cfg.vad_rms_threshold;
 
+                peak_rms_window = peak_rms_window.max(rms);
+                chunks_since_report += 1;
+                if chunks_since_report >= ALIVE_REPORT_CHUNKS {
+                    info!(
+                        peak_rms = %format!("{:.4}", peak_rms_window),
+                        threshold = self.cfg.vad_rms_threshold,
+                        "still listening (last 10s)"
+                    );
+                    chunks_since_report = 0;
+                    peak_rms_window = 0.0;
+                }
+
                 if speaking {
+                    if !in_speech {
+                        info!(rms = %format!("{:.4}", rms), "speech started");
+                        speech_start_chunks = 0;
+                    }
                     silence_run = 0;
                     in_speech = true;
+                    speech_start_chunks += 1;
                     append_i16_samples(&mut segment, &chunk_bytes, max_samples);
                 } else if in_speech {
                     silence_run += 1;
                     append_i16_samples(&mut segment, &chunk_bytes, max_samples);
                     if silence_run >= silence_chunks_threshold || segment.len() >= max_samples {
+                        info!(
+                            speech_chunks = speech_start_chunks,
+                            buffered_samples = segment.len(),
+                            "end of utterance — running whisper-cli"
+                        );
                         // End of utterance — transcribe and check.
                         let matched = self.check_segment(&segment)?;
                         segment.clear();
@@ -167,13 +205,20 @@ impl WhisperWake {
         let result = (|| -> Result<bool> {
             let transcript = self.stt.transcribe(&path)?;
             let hay = normalise(&transcript);
-            debug!(transcript = %transcript, "wake whisper transcribed segment");
-            for phrase in &self.phrases_normalised {
-                if hay.contains(phrase) {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
+            // Log every transcript at INFO so the user can see what the
+            // wake loop is actually hearing — invaluable for tuning
+            // phrases and threshold.
+            let matched = self
+                .phrases_normalised
+                .iter()
+                .any(|phrase| hay.contains(phrase));
+            info!(
+                transcript = %transcript.trim(),
+                normalised = %hay,
+                matched,
+                "wake heard"
+            );
+            Ok(matched)
         })();
 
         let _ = std::fs::remove_file(&path);

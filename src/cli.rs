@@ -76,6 +76,16 @@ enum Cmd {
         #[arg(num_args = 1..)]
         prompt: Vec<String>,
     },
+
+    /// Diagnostic: run the configured wake backend for N seconds with
+    /// verbose logging (RMS readings, transcripts, match status). Use this
+    /// to tune `[wake].vad_rms_threshold` and `[wake].phrases` without
+    /// running the full pipeline. Exits on first wake event or timeout.
+    TestWake {
+        /// How long to keep listening (seconds). Defaults to 30.
+        #[arg(long, default_value_t = 30)]
+        seconds: u64,
+    },
 }
 
 pub fn run() -> Result<()> {
@@ -102,6 +112,7 @@ pub fn run() -> Result<()> {
         Cmd::TestTts { text } => cmd_test_tts(&cfg, &text),
         Cmd::TestStt { seconds } => cmd_test_stt(&cfg, seconds),
         Cmd::TestAgent { prompt } => cmd_test_agent(&cfg, &prompt.join(" ")),
+        Cmd::TestWake { seconds } => cmd_test_wake(&cfg, seconds),
     }
 }
 
@@ -335,6 +346,59 @@ fn cmd_test_stt(cfg: &JarvisConfig, seconds: f32) -> Result<()> {
         return Err(anyhow!("STT returned empty transcription"));
     }
     println!("Heard: {text}");
+    Ok(())
+}
+
+fn cmd_test_wake(cfg: &JarvisConfig, seconds: u64) -> Result<()> {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let backend = crate::wake::build(cfg.wake.clone(), cfg.stt.clone())?;
+    println!(
+        "▶ Listening for {seconds}s with backend={:?}, phrases={:?}, threshold={}",
+        backend.name(),
+        cfg.wake.phrases,
+        cfg.wake.vad_rms_threshold
+    );
+    println!(
+        "  Say one of the phrases or wait for timeout. The log below will show \
+         RMS levels, detected speech, and whisper transcripts."
+    );
+    println!();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    // A timer thread flips the stop flag after `seconds`. The wake backend
+    // polls `should_stop` between audio chunks so termination is responsive
+    // without needing a signal handler at the test-command level.
+    let stop_for_timer = Arc::clone(&stop);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(seconds));
+        stop_for_timer.store(true, Ordering::Relaxed);
+    });
+
+    let triggered = Arc::new(AtomicBool::new(false));
+    let triggered_for_cb = Arc::clone(&triggered);
+    let stop_for_cb = Arc::clone(&stop);
+    let mut on_wake = move || {
+        triggered_for_cb.store(true, Ordering::Relaxed);
+        // First match wins — flip stop so the backend returns.
+        stop_for_cb.store(true, Ordering::Relaxed);
+    };
+
+    let stop_for_check = Arc::clone(&stop);
+    backend.run(&mut on_wake, &|| stop_for_check.load(Ordering::Relaxed))?;
+
+    println!();
+    if triggered.load(Ordering::Relaxed) {
+        println!("✓ Wake phrase matched.");
+    } else {
+        println!(
+            "✗ No wake phrase matched in {seconds}s. Check the log above:\n\
+             \x20  - Is `peak_rms` consistently below your threshold? Lower it.\n\
+             \x20  - Are transcripts unrelated to what you said? Speak closer to the mic.\n\
+             \x20  - Did you see no \"speech started\" lines at all? Mic isn't being captured."
+        );
+    }
     Ok(())
 }
 
