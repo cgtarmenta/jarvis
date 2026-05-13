@@ -63,6 +63,25 @@ enum Cmd {
         text: String,
     },
 
+    /// Speak the given text (or stdin) via the configured TTS backend.
+    /// Use this as a voice-notification target from scripts, Claude Code
+    /// `Stop` hooks, cron, anything that wants to say something out loud.
+    ///
+    /// Examples:
+    ///   jarvis say "build finished"
+    ///   echo "long summary" | jarvis say -
+    ///   jarvis say --voice en_GB-alan-medium "all tests passed"
+    Say {
+        /// Text to speak. If the single arg is `-`, reads stdin until EOF.
+        /// Multiple words are joined with spaces.
+        #[arg(num_args = 0..)]
+        text: Vec<String>,
+        /// Override `[tts].voice` for this call only. Useful for trying a
+        /// voice without editing config.
+        #[arg(long)]
+        voice: Option<String>,
+    },
+
     /// One-shot STT: record N seconds, transcribe, print the transcript.
     TestStt {
         #[arg(long, default_value_t = 4.0)]
@@ -178,6 +197,7 @@ pub fn run() -> Result<()> {
         Cmd::EditConfig => cmd_edit_config(&cfg_path),
         Cmd::Doctor => cmd_doctor(&cfg, &cfg_path),
         Cmd::TestTts { text } => cmd_test_tts(&cfg, &text),
+        Cmd::Say { text, voice } => cmd_say(&cfg, text, voice.as_deref()),
         Cmd::TestStt { seconds } => cmd_test_stt(&cfg, seconds),
         Cmd::TestAgent { prompt } => cmd_test_agent(&cfg, &prompt.join(" ")),
         Cmd::Session { cmd } => cmd_session(cmd),
@@ -405,6 +425,54 @@ fn cmd_doctor(cfg: &JarvisConfig, cfg_path: &Path) -> Result<()> {
 fn cmd_test_tts(cfg: &JarvisConfig, text: &str) -> Result<()> {
     let tts = crate::tts::build(cfg.tts.clone())?;
     tts.speak(text)
+}
+
+/// `jarvis say [TEXT...] [--voice X]` — speak the argument (or stdin) via
+/// the configured TTS. Designed to be a drop-in notification target for
+/// any script that wants a voice cue:
+///
+/// ```ignore
+/// cargo build && jarvis say "build ok"
+/// claude --print 'summarise' | jarvis say -
+/// ```
+fn cmd_say(cfg: &JarvisConfig, text: Vec<String>, voice: Option<&str>) -> Result<()> {
+    // Resolve the text. Either:
+    //   * no args, or the single arg `-`  → read stdin until EOF (pipes)
+    //   * positional args                 → join with spaces
+    //
+    // Reading stdin on no-args matches the typical `cat`/`tee` pattern
+    // where omitting the input file means "read from stdin".
+    let resolved = if text.is_empty() || text == ["-"] {
+        read_stdin()?
+    } else {
+        text.join(" ")
+    };
+
+    // Empty input is a no-op — exit 0 silently. Otherwise `cargo build &&
+    // jarvis say ""` would error on the failure-but-no-output edge case.
+    if resolved.trim().is_empty() {
+        return Ok(());
+    }
+
+    // `--voice` override clones the TtsConfig instead of mutating the
+    // loaded one in place so we never accidentally leak state across
+    // commands.
+    let mut tts_cfg = cfg.tts.clone();
+    if let Some(v) = voice {
+        tts_cfg.voice = v.to_string();
+    }
+
+    let tts = crate::tts::build(tts_cfg)?;
+    tts.speak(&resolved)
+}
+
+fn read_stdin() -> Result<String> {
+    use std::io::Read;
+    let mut buf = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buf)
+        .context("reading stdin")?;
+    Ok(buf)
 }
 
 fn cmd_test_stt(cfg: &JarvisConfig, seconds: f32) -> Result<()> {

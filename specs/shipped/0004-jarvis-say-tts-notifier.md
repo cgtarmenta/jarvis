@@ -1,10 +1,10 @@
 ---
 id: 0004
 title: jarvis say TTS notifier
-status: active
+status: shipped
 owner: tadeo
 created: 2026-05-13
-shipped:
+shipped: 2026-05-13
 verifying:
   - cargo run -- say "hello"
   - echo "piped text" | cargo run -- say -
@@ -43,20 +43,20 @@ own spec.
 
 ## What
 
-- [ ] `jarvis say <text>` speaks `<text>` via the configured TTS backend
+- [x] `jarvis say <text>` speaks `<text>` via the configured TTS backend
   and exits with status 0 on success.
-- [ ] `jarvis say -` reads stdin until EOF and speaks that, so the
+- [x] `jarvis say -` reads stdin until EOF and speaks that, so the
   common pipe form works: `echo hi | jarvis say -`.
-- [ ] `jarvis say --voice <id>` overrides `[tts].voice` for that call
+- [x] `jarvis say --voice <id>` overrides `[tts].voice` for that call
   only, without editing config — useful for trying voices.
-- [ ] Empty / whitespace-only input is a no-op: exit 0, nothing spoken,
+- [x] Empty / whitespace-only input is a no-op: exit 0, nothing spoken,
   no subprocess spawn.
-- [ ] When the TTS subprocess fails, the command exits non-zero and the
+- [x] When the TTS subprocess fails, the command exits non-zero and the
   underlying error is printed to stderr.
-- [ ] The README has a "Notify on long-running tasks" section with a
+- [x] The README has a "Notify on long-running tasks" section with a
   concrete Claude Code `Stop` hook example (`~/.claude/settings.json`)
   that fires `jarvis say "..."`.
-- [ ] CHANGELOG entry lands under `## [Unreleased]`.
+- [x] CHANGELOG entry lands under `## [Unreleased]`.
 
 ## How
 
@@ -80,6 +80,8 @@ For v1, last-writer-wins is acceptable — the user can pipe with `&&`
 when they want serialisation.
 
 ## Journal
+
+- 2026-05-13: shipped.
 
 - 2026-05-13: promoted to active.
 

@@ -193,6 +193,46 @@ there.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the contributor workflow and
 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community norms.
 
+## Notify on long-running tasks
+
+Jarvis exposes its TTS pipeline as `jarvis say` so any long-running
+task can announce completion by voice without you having to look at
+the screen:
+
+```sh
+cargo build --release && jarvis say "build finished"
+deploy.sh && jarvis say "deploy ok" || jarvis say "deploy failed"
+echo "long summary text" | jarvis say -
+jarvis say --voice en_GB-alan-medium "tests passed"
+```
+
+Hook it into [Claude Code's `Stop` event](https://docs.claude.com/en/docs/claude-code/hooks)
+to get a voice cue every time Claude finishes a turn — edit
+`~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          { "type": "command", "command": "jarvis say \"Lista la tarea.\"" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+For a TTS summary instead of a fixed phrase, have the hook ask Claude
+for a one-liner and pipe it through:
+
+```json
+{ "type": "command",
+  "command": "claude --print --resume \"$CLAUDE_SESSION_ID\" 'In one sentence, what did you just finish?' | jarvis say -" }
+```
+
 ## Specs
 
 We use lightweight spec-driven development: each non-trivial change

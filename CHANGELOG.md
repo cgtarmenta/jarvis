@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `jarvis say <text>` subcommand exposes the TTS pipeline as a generic
+  voice-notification target. Reads stdin when invoked as `jarvis say -`
+  or with no args, accepts `--voice` to try a voice without editing
+  config, is a no-op on empty input. Pairs nicely with Claude Code's
+  `Stop` hook — see the README for an example.
 - Conversation sessions: persistent JSON-backed history at
   `~/.cache/jarvis/sessions/current.json` so the agent keeps context
   across wake events. New `[session]` config block, `jarvis session
