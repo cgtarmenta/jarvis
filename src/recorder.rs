@@ -278,6 +278,13 @@ pub fn record_with_onset(cfg: &RecordConfig, onset_window_secs: f32) -> Result<O
     const CHUNK_MS: f32 = 100.0;
     const CHUNK_SAMPLES: usize = (SAMPLE_RATE as f32 * CHUNK_MS / 1000.0) as usize;
     const CHUNK_BYTES: usize = CHUNK_SAMPLES * 2;
+    /// Always-on ring of the last N chunks of audio, regardless of
+    /// whether they exceeded the voice threshold. When onset confirms,
+    /// we prepend the ring to the capture so a soft consonant or a
+    /// breathy syllable that started *just below* threshold isn't
+    /// lost. Five chunks = 500 ms — generous enough to grab a typical
+    /// gradual onset without polluting captures with audible noise.
+    const PREROLL_CHUNKS: usize = 5;
     let chunks_per_sec = 1000.0 / CHUNK_MS;
     let onset_sustain_chunks = 2usize; // 200 ms — short enough to feel snappy
 
@@ -292,6 +299,8 @@ pub fn record_with_onset(cfg: &RecordConfig, onset_window_secs: f32) -> Result<O
     }
     let mut state = State::SeekingOnset { voice_run: 0 };
     let mut samples: Vec<i16> = Vec::with_capacity(CHUNK_SAMPLES * (max_capture_chunks + 4));
+    let mut preroll: std::collections::VecDeque<Vec<i16>> =
+        std::collections::VecDeque::with_capacity(PREROLL_CHUNKS);
     let mut buf = vec![0u8; CHUNK_BYTES];
     let mut elapsed_chunks = 0usize;
 
@@ -307,15 +316,28 @@ pub fn record_with_onset(cfg: &RecordConfig, onset_window_secs: f32) -> Result<O
         let rms = compute_rms_normalised(&buf);
         let dbfs = rms_to_dbfs(rms);
         let voiced = dbfs >= silence_threshold;
+        let chunk_samples = decode_chunk_to_i16(&buf);
 
         match state {
             State::SeekingOnset { mut voice_run } => {
+                // Always feed the preroll ring, voiced or not. When
+                // onset triggers we flush the ring into `samples` so
+                // the leading edge survives, including any soft onset
+                // chunks that didn't individually cross threshold.
+                if preroll.len() == PREROLL_CHUNKS {
+                    preroll.pop_front();
+                }
+                preroll.push_back(chunk_samples);
+
                 if voiced {
                     voice_run += 1;
-                    // Keep the audio of *every* voiced chunk so the leading
-                    // edge of the utterance survives onset confirmation.
-                    samples.extend(decode_chunk_to_i16(&buf));
                     if voice_run >= onset_sustain_chunks {
+                        // Flush the preroll into `samples` before
+                        // transitioning so the captured WAV starts
+                        // ~500 ms before the confirmed-voice moment.
+                        for c in preroll.drain(..) {
+                            samples.extend(c);
+                        }
                         state = State::Capturing {
                             silence_run: 0,
                             captured: voice_run,
@@ -324,9 +346,10 @@ pub fn record_with_onset(cfg: &RecordConfig, onset_window_secs: f32) -> Result<O
                         state = State::SeekingOnset { voice_run };
                     }
                 } else {
-                    // False start — discard any preliminary voiced
-                    // samples we'd buffered, reset the counter.
-                    samples.clear();
+                    // Drop voice_run on a not-voiced gap. The preroll
+                    // is still maintained above, so a real onset that
+                    // follows a brief dip still gets its leading
+                    // audio when it triggers.
                     state = State::SeekingOnset { voice_run: 0 };
                     if elapsed_chunks >= max_onset_chunks {
                         return Ok(None);
@@ -337,7 +360,7 @@ pub fn record_with_onset(cfg: &RecordConfig, onset_window_secs: f32) -> Result<O
                 mut silence_run,
                 mut captured,
             } => {
-                samples.extend(decode_chunk_to_i16(&buf));
+                samples.extend(chunk_samples);
                 captured += 1;
                 if voiced {
                     silence_run = 0;
@@ -553,20 +576,20 @@ mod tests {
         assert_eq!(rms_to_dbfs(rms), f32::NEG_INFINITY);
     }
 
-    /// The user-facing default must be loose enough that a typical
-    /// home/office mic — which sits around -35 dBFS at idle — counts
-    /// as "silence" so trailing-silence detection actually fires. v1
-    /// of spec 0007 shipped with the recorder hard-coding -40 dBFS,
-    /// which was too strict and was the proximate cause of utterances
-    /// running to the full `max_seconds`. The default is the contract
-    /// the recipe in `config.example.toml` documents; if someone
-    /// changes the default they should also update the recipe.
+    /// The user-facing default must be loose enough that natural
+    /// speech (including inter-word articulation dips at ~-38 dBFS)
+    /// stays above threshold. Live testing on 2026-05-13 walked this
+    /// down through -30 → -35 → -40 as we learned more about real
+    /// USB-headset behavior. The contract here is "no stricter than
+    /// -35 and no looser than -50" — anything outside is almost
+    /// certainly a regression, but the band is wide enough that
+    /// future tuning between -38 and -45 doesn't trip CI.
     #[test]
     fn silence_threshold_default_is_user_friendly() {
         let cfg = RecordConfig::default();
         assert!(
-            cfg.silence_threshold_db >= -35.0 && cfg.silence_threshold_db <= -25.0,
-            "expected default silence_threshold_db in [-35, -25], got {}",
+            cfg.silence_threshold_db >= -50.0 && cfg.silence_threshold_db <= -35.0,
+            "expected default silence_threshold_db in [-50, -35], got {}",
             cfg.silence_threshold_db
         );
     }
