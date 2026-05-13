@@ -68,15 +68,18 @@ fn defaults_are_sensible() {
     assert!(!cfg.wake.enabled);
 }
 
-/// Spec 0007: the follow-up window must default to 6.0s so the feature
-/// is on out of the box. A zero default would silently disable a
-/// behavior users expect from a freshly-installed Jarvis.
+/// Spec 0007: the follow-up window must default to a value generous
+/// enough that a user thinking briefly between turns doesn't time
+/// out. Live testing on 2026-05-13 showed 6 s was too tight (the
+/// user routinely took ~10-13 s to start the next turn), so the
+/// default was bumped to 10.0. The contract is "at least 8 s" so
+/// modest future tuning doesn't trip this test.
 #[test]
-fn followup_window_default_is_six_seconds() {
+fn followup_window_default_is_generous() {
     let cfg = JarvisConfig::default();
     assert!(
-        (cfg.session.followup_window_secs - 6.0).abs() < f32::EPSILON,
-        "expected followup_window_secs default 6.0, got {}",
+        cfg.session.followup_window_secs >= 8.0,
+        "expected followup_window_secs default >= 8.0, got {}",
         cfg.session.followup_window_secs
     );
 }

@@ -173,7 +173,12 @@ impl Default for RecordConfig {
             channels: 1,
             max_seconds: 15.0,
             silence_seconds: 1.5,
-            silence_threshold_db: -30.0,
+            // -35 dBFS: looser than the original -30 because live testing
+            // on a normal USB-mic-plus-laptop-fan setup showed speech RMS
+            // landing around -32 dBFS, which a -30 dBFS threshold
+            // misclassified as silence. Idle on the same rig sits at
+            // -40 to -50 dBFS, so -35 still cleanly separates the two.
+            silence_threshold_db: -35.0,
             command: Vec::new(),
         }
     }
@@ -305,7 +310,7 @@ impl Default for SessionConfig {
             enabled: true,
             ttl_seconds: 30 * 60,
             max_turns: 30,
-            followup_window_secs: 6.0,
+            followup_window_secs: 10.0,
             reset_phrases: vec![
                 "olvida".into(),
                 "olvidalo".into(),

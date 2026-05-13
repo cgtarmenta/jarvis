@@ -68,11 +68,12 @@ sample_rate     = 16000
 channels        = 1
 max_seconds     = 15.0
 silence_seconds = 1.5
-silence_threshold_db = -30.0   # dBFS below which audio counts as silence.
-                                # Looser (-25.0) if your utterances get cut
-                                # off because ambient noise prevents the
-                                # silence detector from firing; tighter
-                                # (-40.0) only in a sound-treated room.
+silence_threshold_db = -35.0   # dBFS below which audio counts as silence.
+                                # Default tuned for normal USB headset / laptop
+                                # mic (speech ~-25 to -33 dBFS, idle ~-40 to
+                                # -50 dBFS). Loosen toward -30 if your mic
+                                # picks up natural pauses as voice; tighten
+                                # toward -40 only in a sound-treated room.
 # command         = ["arecord", "-r", "16000", "-f", "S16_LE", "{out}"]
 
 # ----------------------------------------------------------------------------
@@ -186,7 +187,7 @@ name = "claude"
 enabled              = true
 ttl_seconds          = 1800     # session expires after 30 min idle (0 = never)
 max_turns            = 30       # keep at most this many turns in the prompt
-followup_window_secs = 6.0      # after each daemon turn, keep listening this
+followup_window_secs = 10.0     # after each daemon turn, keep listening this
                                 # long without re-requiring the wake word (0
                                 # disables follow-up; conversations chain
                                 # naturally for short clarifications)

@@ -539,9 +539,7 @@ mod tests {
     fn rms_to_dbfs_calibration() {
         // Two bytes per sample, little-endian. A buffer of pure max-int
         // samples should produce an RMS very close to 1.0 (full scale).
-        let full_scale: Vec<u8> = (0..1600)
-            .flat_map(|_| i16::MAX.to_le_bytes())
-            .collect();
+        let full_scale: Vec<u8> = (0..1600).flat_map(|_| i16::MAX.to_le_bytes()).collect();
         let rms = compute_rms_normalised(&full_scale);
         assert!(rms > 0.99, "expected full-scale rms ~1.0, got {rms}");
         let db = rms_to_dbfs(rms);
