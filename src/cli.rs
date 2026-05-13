@@ -44,6 +44,9 @@ enum Cmd {
     /// Run the daemon in the foreground with debug logging — for development.
     Dev,
 
+    /// Interactive first-time setup: pick language, Whisper model, voice, agent.
+    Setup,
+
     /// Print the active config path and contents.
     Config,
 
@@ -92,6 +95,7 @@ pub fn run() -> Result<()> {
         Cmd::Listen => cmd_listen(&cfg),
         Cmd::Daemon => crate::daemon::run(cfg),
         Cmd::Dev => cmd_dev(&cfg_path),
+        Cmd::Setup => crate::setup::run(),
         Cmd::Config => cmd_config(&cfg_path),
         Cmd::EditConfig => cmd_edit_config(&cfg_path),
         Cmd::Doctor => cmd_doctor(&cfg, &cfg_path),
@@ -172,8 +176,25 @@ fn cmd_doctor(cfg: &JarvisConfig, cfg_path: &Path) -> Result<()> {
         cfg_path.exists(),
         &cfg_path.display().to_string(),
     );
-    let piper = which::which(&cfg.tts.piper_binary).is_ok();
-    line("piper binary", piper, &cfg.tts.piper_binary);
+    let piper_present = which::which(&cfg.tts.piper_binary).is_ok();
+    let piper_issue = if piper_present {
+        crate::tts::piper_binary_issue(&cfg.tts.piper_binary)
+    } else {
+        None
+    };
+    let piper_ok = piper_present && piper_issue.is_none();
+    let piper_detail = match (piper_present, piper_issue.as_deref()) {
+        (false, _) => cfg.tts.piper_binary.clone(),
+        (true, Some(issue)) => format!("{} — {issue}", cfg.tts.piper_binary),
+        (true, None) => cfg.tts.piper_binary.clone(),
+    };
+    line("piper binary", piper_ok, &piper_detail);
+    if piper_present && piper_issue.is_some() {
+        println!(
+            "    → install piper-tts (AUR): yay -S piper-tts \
+             (may require removing the gaming-mice `piper` first)"
+        );
+    }
     let espeak = which::which("espeak-ng").is_ok() || which::which("espeak").is_ok();
     line("espeak-ng", espeak, "fallback TTS");
     let player = ["paplay", "pw-play", "aplay", "afplay"]
@@ -192,11 +213,37 @@ fn cmd_doctor(cfg: &JarvisConfig, cfg_path: &Path) -> Result<()> {
 
     let whisper = which::which(&cfg.stt.binary).is_ok();
     line("STT binary", whisper, &cfg.stt.binary);
-    line(
-        "STT model",
-        std::path::Path::new(&cfg.stt.model).is_file(),
-        &cfg.stt.model,
-    );
+    let stt_model_ok = std::path::Path::new(&cfg.stt.model).is_file();
+    line("STT model", stt_model_ok, &cfg.stt.model);
+    if !stt_model_ok {
+        println!("    → run `jarvis setup` to pick and download a model");
+    }
+
+    // Probe GPU support. whisper.cpp only prints the specific backend name
+    // ("ggml_vulkan: ...", "ggml_cuda_init: ...") in stderr *when actually
+    // decoding*, not in `--help`. What we *can* check cheaply is whether
+    // the `--no-gpu` / `--device` flags exist — their presence means at
+    // least one GPU backend is compiled in. To name it we'd have to run
+    // an actual transcription; that's what `jarvis test-stt` is for.
+    if which::which(&cfg.stt.binary).is_ok() {
+        let probe = std::process::Command::new(&cfg.stt.binary)
+            .arg("--help")
+            .output();
+        match probe {
+            Ok(out) => {
+                let help =
+                    String::from_utf8_lossy(&out.stdout) + String::from_utf8_lossy(&out.stderr);
+                let has_gpu_flags = help.contains("--no-gpu") || help.contains("--device");
+                let detail = if has_gpu_flags {
+                    "GPU backend compiled in (run `jarvis test-stt` to see which)".to_string()
+                } else {
+                    "CPU only (--no-gpu flag absent from --help)".to_string()
+                };
+                line("STT GPU", has_gpu_flags, &detail);
+            }
+            Err(_) => line("STT GPU", false, "could not probe whisper-cli --help"),
+        }
+    }
 
     match cfg.agent.name.as_str() {
         "claude" | "claude-code" => {
@@ -224,6 +271,31 @@ fn cmd_doctor(cfg: &JarvisConfig, cfg_path: &Path) -> Result<()> {
                 || env::var("GEMINI_API_KEY").is_ok()
                 || env::var("GOOGLE_API_KEY").is_ok();
             line("GEMINI_API_KEY", ok, "env var or [agent].api_key");
+        }
+        "warp" | "oz" => {
+            let bin = cfg
+                .agent
+                .options
+                .get("binary")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .or_else(|| {
+                    ["oz", "oz-preview", "warp-cli"]
+                        .into_iter()
+                        .find(|b| which::which(b).is_ok())
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| "oz".into());
+            line(
+                &format!("agent: {bin}"),
+                which::which(&bin).is_ok(),
+                "Warp oz CLI",
+            );
+            let auth_ok = cfg.agent.options.contains_key("api_key")
+                || env::var("WARP_API_KEY")
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false);
+            line("WARP_API_KEY", auth_ok, "env var or [agent].api_key");
         }
         "shell" => {
             let bin = cfg

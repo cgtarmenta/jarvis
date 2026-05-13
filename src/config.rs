@@ -13,12 +13,25 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use directories::ProjectDirs;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub const APP_NAME: &str = "jarvis";
 pub const ORG: &str = "jarvis";
 pub const QUALIFIER: &str = "computer";
 pub const CONFIG_FILENAME: &str = "config.toml";
+
+/// Schema version of the TOML config. Bump this whenever a breaking change
+/// is made: field removed, field renamed, semantics changed. Adding new
+/// fields with sensible defaults does **not** require a bump.
+///
+/// Old user configs with a lower `config_version` (or no version at all)
+/// fail to load with a clear message pointing them at `jarvis setup`.
+///
+/// Changelog:
+///   1 — initial Rust release (implicit; configs without `config_version`)
+///   2 — `[wake]` schema rewrite: `model` removed, `backend` + `phrases` added.
+///       Wake-word backend made pluggable.
+pub const CURRENT_CONFIG_VERSION: u32 = 2;
 
 /// Bundled example config — compiled into the binary so a fresh install is
 /// always self-sufficient even without /usr/share.
@@ -60,31 +73,50 @@ pub fn ensure_config() -> Result<PathBuf> {
     Ok(path)
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default, deny_unknown_fields)]
 pub struct WakeConfig {
+    /// Master switch: when false the daemon doesn't listen for a wake word
+    /// at all. Hotkey-driven `jarvis listen` works regardless.
     pub enabled: bool,
-    pub model: String,
-    pub threshold: f32,
+    /// Which wake-word backend to use.
+    /// Implemented today: `"none"`, `"whisper"`.
+    /// Roadmap (return an error if selected today): `"sherpa"`,
+    /// `"openwakeword"`, `"rustpotter"`.
+    pub backend: String,
+    /// Words or short phrases that trigger Jarvis. Matched case-insensitive
+    /// after stripping accents, so `"mutombo"` matches `"¡Mutombo!"`.
+    /// Empty for `backend = "none"`; required otherwise.
+    pub phrases: Vec<String>,
+    /// RMS threshold for the energy VAD: anything below counts as silence.
+    /// Range: 0.0 (everything is speech) — 1.0 (nothing is). Sane: 0.02–0.1.
+    pub vad_rms_threshold: f32,
+    /// Trailing silence (seconds) that ends a candidate utterance and
+    /// triggers transcription.
+    pub silence_seconds: f32,
+    /// Cap on a single utterance — force-transcribe at this length even if
+    /// the user is still talking.
+    pub max_listen_seconds: f32,
+    /// Backwards-compat / future use. CUDA / Vulkan / Metal kick in via the
+    /// main STT config; this is reserved for backend-specific tuning later.
     pub cooldown_seconds: f32,
-    pub sample_rate: u32,
-    pub input_device: Option<String>,
 }
 
 impl Default for WakeConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            model: "hey_jarvis".into(),
-            threshold: 0.5,
+            backend: "none".into(),
+            phrases: vec!["jarvis".into()],
+            vad_rms_threshold: 0.03,
+            silence_seconds: 0.8,
+            max_listen_seconds: 3.0,
             cooldown_seconds: 2.0,
-            sample_rate: 16_000,
-            input_device: None,
         }
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default, deny_unknown_fields)]
 pub struct RecordConfig {
     /// `auto` lets jarvis pick the first available recorder.
@@ -112,7 +144,7 @@ impl Default for RecordConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default, deny_unknown_fields)]
 pub struct SttConfig {
     pub backend: String,
@@ -120,6 +152,19 @@ pub struct SttConfig {
     pub model: String,
     pub language: String,
     pub threads: u32,
+    /// GPU acceleration. `None` = let whisper.cpp pick (the default — uses GPU
+    /// if the binary was compiled with CUDA / Vulkan / Metal / ROCm).
+    /// `Some(false)` adds `--no-gpu` to force CPU. `Some(true)` is a no-op
+    /// today since whisper.cpp has no "force GPU" flag — set it for
+    /// documentation / future-proofing.
+    pub use_gpu: Option<bool>,
+    /// Pick a specific GPU on multi-GPU systems. Maps to `--gpu-device N`.
+    /// Only honoured by CUDA builds; Vulkan/Metal pick automatically.
+    pub gpu_device: Option<u32>,
+    /// Flash-attention. Speeds up decoding on Ampere/Hopper and Apple Silicon.
+    /// Maps to `--flash-attn`. Safe to leave on if your hardware supports it;
+    /// older GPUs will just ignore it.
+    pub flash_attn: bool,
     pub extra_args: Vec<String>,
     /// Used only when `backend = "command"`. `{wav}` is replaced with the WAV path.
     pub command: Vec<String>,
@@ -133,13 +178,16 @@ impl Default for SttConfig {
             model: "/usr/share/whisper.cpp/models/ggml-base.en.bin".into(),
             language: "en".into(),
             threads: 4,
+            use_gpu: None,
+            gpu_device: None,
+            flash_attn: false,
             extra_args: Vec::new(),
             command: Vec::new(),
         }
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default, deny_unknown_fields)]
 pub struct TtsConfig {
     pub backend: String,
@@ -166,7 +214,11 @@ impl Default for TtsConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
+// NOTE: `deny_unknown_fields` is **not** compatible with `serde(flatten)`.
+// AgentConfig accepts arbitrary keys past `name` and forwards them to the
+// agent constructor — schema-strictness lives at the JarvisConfig / per-
+// section level instead.
 #[serde(default)]
 pub struct AgentConfig {
     pub name: String,
@@ -185,9 +237,11 @@ impl Default for AgentConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default, deny_unknown_fields)]
 pub struct JarvisConfig {
+    /// Schema version. See `CURRENT_CONFIG_VERSION` for the changelog.
+    pub config_version: u32,
     pub log_level: String,
     pub speak_responses: bool,
     pub wake: WakeConfig,
@@ -200,6 +254,7 @@ pub struct JarvisConfig {
 impl Default for JarvisConfig {
     fn default() -> Self {
         Self {
+            config_version: CURRENT_CONFIG_VERSION,
             log_level: "INFO".into(),
             speak_responses: true,
             wake: WakeConfig::default(),
@@ -211,9 +266,42 @@ impl Default for JarvisConfig {
     }
 }
 
+/// Load and validate the config at `path`.
+///
+/// This is a two-pass operation:
+/// 1. **Version probe** — parse the file as an untyped `toml::Table` and
+///    read just `config_version`. If it's missing or older than
+///    `CURRENT_CONFIG_VERSION`, bail with a migration message *before*
+///    serde sees any unknown fields (which would give a worse error).
+/// 2. **Typed parse** — once the version checks out, deserialise into the
+///    real struct with `deny_unknown_fields` enabled so typos are caught.
 pub fn load(path: &Path) -> Result<JarvisConfig> {
     let raw =
         fs::read_to_string(path).with_context(|| format!("reading config: {}", path.display()))?;
+
+    let probe: toml::Table = toml::from_str(&raw)
+        .with_context(|| format!("config is not valid TOML: {}", path.display()))?;
+    let found_version = probe
+        .get("config_version")
+        .and_then(|v| v.as_integer())
+        .map(|i| i as u32)
+        .unwrap_or(0);
+
+    if found_version < CURRENT_CONFIG_VERSION {
+        return Err(migration_error(path, found_version));
+    }
+    if found_version > CURRENT_CONFIG_VERSION {
+        // The user has a newer jarvis binary's config file but is running an
+        // older binary. Don't try to "downgrade" — refuse cleanly.
+        return Err(anyhow!(
+            "config_version {found} is newer than this binary supports (max {current}). \
+             Upgrade jarvis or use an older config file. ({path})",
+            found = found_version,
+            current = CURRENT_CONFIG_VERSION,
+            path = path.display()
+        ));
+    }
+
     let mut cfg: JarvisConfig =
         toml::from_str(&raw).with_context(|| format!("parsing config: {}", path.display()))?;
 
@@ -223,4 +311,20 @@ pub fn load(path: &Path) -> Result<JarvisConfig> {
         cfg.agent.name = agent;
     }
     Ok(cfg)
+}
+
+fn migration_error(path: &Path, found: u32) -> anyhow::Error {
+    anyhow!(
+        "config_version {found} is older than this binary expects (v{current}).\n\n\
+         The schema changed between releases — your config has fields the new \
+         binary doesn't recognise (or vice versa). Run:\n\n\
+         \x20   jarvis setup\n\n\
+         to interactively regenerate the config (your old file will be backed up \
+         to {path}.bak first), or, to discard your tweaks and start clean:\n\n\
+         \x20   mv {path} {path}.bak\n\
+         \x20   jarvis setup",
+        found = found,
+        current = CURRENT_CONFIG_VERSION,
+        path = path.display()
+    )
 }

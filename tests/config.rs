@@ -39,7 +39,8 @@ fn load_returns_defaults_for_example() {
     redirect_xdg(&tmp);
     let path = config::ensure_config().unwrap();
     let cfg = config::load(&path).expect("parse example");
-    assert_eq!(cfg.wake.model, "hey_jarvis");
+    assert_eq!(cfg.wake.backend, "none");
+    assert_eq!(cfg.wake.phrases, vec!["jarvis".to_string()]);
     assert!(cfg.speak_responses);
     assert_eq!(cfg.agent.name, "claude");
 }
@@ -65,4 +66,43 @@ fn defaults_are_sensible() {
     assert_eq!(cfg.tts.backend, "piper");
     assert_eq!(cfg.record.backend, "auto");
     assert!(!cfg.wake.enabled);
+}
+
+#[test]
+#[serial]
+fn old_schema_config_fails_with_migration_hint() {
+    let tmp = TempDir::new().unwrap();
+    redirect_xdg(&tmp);
+    let cfg_path = tmp.path().join("config").join("jarvis").join("config.toml");
+    std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
+    // Write a v0/legacy config with the now-removed `model` wake field.
+    std::fs::write(
+        &cfg_path,
+        "log_level = \"INFO\"\nspeak_responses = true\n\n[wake]\nmodel = \"hey_jarvis\"\n",
+    )
+    .unwrap();
+
+    let err = config::load(&cfg_path).expect_err("expected version migration error");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("config_version") && msg.contains("jarvis setup"),
+        "expected migration hint mentioning config_version and jarvis setup, got: {msg}"
+    );
+}
+
+#[test]
+#[serial]
+fn future_schema_config_fails_explicitly() {
+    let tmp = TempDir::new().unwrap();
+    redirect_xdg(&tmp);
+    let cfg_path = tmp.path().join("config").join("jarvis").join("config.toml");
+    std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
+    std::fs::write(&cfg_path, "config_version = 999\nlog_level = \"INFO\"\n").unwrap();
+
+    let err = config::load(&cfg_path).expect_err("expected future-version refusal");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("999") && msg.contains("newer"),
+        "expected 'newer than this binary' refusal, got: {msg}"
+    );
 }

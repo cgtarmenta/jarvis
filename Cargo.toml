@@ -55,6 +55,17 @@ tempfile = "3.10"
 ureq = { version = "2.10", features = ["tls", "json"] }
 serde_json = "1.0"
 
+# Interactive setup wizard. `dialoguer` is the mature pick — Select / Input /
+# Confirm / Password prompts that respect TERM and degrade in plain pipes.
+dialoguer = { version = "0.11", default-features = false, features = ["completion", "password"] }
+# Progress bars for model / voice downloads.
+indicatif = "0.17"
+
+# Used to send SIGTERM to recorder subprocesses on timeout (parecord and
+# pw-record have no `--duration` flag, so we kill them ourselves).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # Black-box CLI testing.
 assert_cmd = "2.0"

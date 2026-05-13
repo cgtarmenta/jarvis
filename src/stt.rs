@@ -47,6 +47,19 @@ impl Stt for WhisperCli {
             .args(["-l", &self.cfg.language])
             .args(["-t", &self.cfg.threads.to_string()])
             .args(["--no-timestamps", "--no-prints"]);
+
+        // GPU controls. `use_gpu = None` is the default; we add nothing and
+        // whisper.cpp uses its compiled-in default (GPU when available).
+        if self.cfg.use_gpu == Some(false) {
+            cmd.arg("--no-gpu");
+        }
+        if let Some(dev) = self.cfg.gpu_device {
+            cmd.args(["-d", &dev.to_string()]);
+        }
+        if self.cfg.flash_attn {
+            cmd.arg("--flash-attn");
+        }
+
         for arg in &self.cfg.extra_args {
             cmd.arg(arg);
         }

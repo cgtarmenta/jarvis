@@ -6,6 +6,12 @@
 #  Edit and then:  systemctl --user restart jarvis   (or just rerun `jarvis listen`)
 # ============================================================================
 
+# Schema version. Bumped when fields are removed or renamed. If your binary
+# expects a higher version than this file declares, `jarvis` refuses to start
+# and tells you to run `jarvis setup` to regenerate. Adding new fields with
+# defaults does not require a bump.
+config_version  = 2
+
 log_level       = "INFO"     # error | warn | info | debug | trace
 speak_responses = true       # set false to print replies only (no TTS)
 
@@ -15,13 +21,24 @@ speak_responses = true       # set false to print replies only (no TTS)
 # Hotkey-driven is the default: bind `jarvis listen` to a global hotkey in
 # your WM (Hyprland, sway, GNOME, macOS Shortcuts, ...). Set enabled = true
 # only if you want the always-listening mode.
+#
+# Backends:
+#   "none"          hotkey only (default)
+#   "whisper"       reuses whisper-cli; matches `phrases` against transcripts.
+#                   Custom words work out of the box ("mutombo" is fine).
+#                   No new deps. Latency 400-900 ms on CPU.
+#   "sherpa"        sherpa-onnx KWS (ROADMAP — not yet implemented).
+#                   Would offer ~80 ms latency.
+#   "openwakeword"  pre-trained models (hey_jarvis, alexa, ...) (ROADMAP).
+#   "rustpotter"    trained from your own voice samples (ROADMAP).
 [wake]
-enabled          = false
-model            = "hey_jarvis"
-threshold        = 0.5
-cooldown_seconds = 2.0
-sample_rate      = 16000
-# input_device   = "default"
+enabled           = false
+backend           = "none"
+phrases           = ["jarvis"]
+vad_rms_threshold = 0.03    # 0.02 catches whispers; 0.08 ignores soft talk
+silence_seconds   = 0.8     # trailing silence that ends an utterance
+max_listen_seconds = 3.0    # cap on one utterance before forced transcribe
+cooldown_seconds  = 2.0
 
 # ----------------------------------------------------------------------------
 #  Recorder (captures audio to a WAV for the STT backend)
@@ -50,6 +67,20 @@ binary     = "whisper-cli"
 model      = "/usr/share/whisper.cpp/models/ggml-base.en.bin"
 language   = "en"
 threads    = 4
+
+# GPU acceleration:
+# whisper.cpp uses your GPU automatically when the binary was compiled with
+# CUDA / Vulkan / Metal / ROCm support — the Arch AUR `whisper.cpp` ships
+# with Vulkan, so most users do not need to touch these settings.
+#
+# use_gpu     omit (default) → let whisper.cpp decide (uses GPU if available)
+#             false         → force CPU (`--no-gpu`)
+# gpu_device  uint          → pick GPU index N on multi-GPU systems (CUDA only)
+# flash_attn  bool          → enable flash-attention (Ampere/Hopper/Apple Silicon)
+# use_gpu     = false
+# gpu_device  = 0
+flash_attn  = false
+
 extra_args = []
 # For any other tool, switch to backend = "command" and set:
 # command = ["my-transcribe", "--input", "{wav}"]
@@ -102,6 +133,20 @@ name = "claude"
 # name  = "gemini"
 # model = "gemini-1.5-flash"
 # Expects GEMINI_API_KEY (or GOOGLE_API_KEY).
+
+# ---- Warp (oz CLI) ---------------------------------------------------------
+# Wraps `oz agent run --prompt …`. The Warp local agent can pick among
+# several models via `--model` and has access to MCP servers. Expects
+# WARP_API_KEY in env (or set `api_key` here). The legacy binary `warp-cli`
+# is auto-detected as a fallback but is deprecated upstream — install via
+# Warp.app's Command Palette → "Install Oz CLI Command", or
+# `brew install --cask oz` on macOS.
+# name    = "warp"
+# binary  = "oz"          # also accepts "oz-preview"; auto-detected if unset
+# model   = "claude-3.7-sonnet"
+# profile = "<profile-id>"
+# cwd     = "/home/you/projects"
+# api_key = "wk-..."      # prefer WARP_API_KEY env var instead
 
 # ---- Shell (Ollama, custom script, agent-generated plugin) -----------------
 # name    = "shell"

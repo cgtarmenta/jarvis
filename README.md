@@ -74,12 +74,29 @@ git clone https://github.com/tadeoarmenta/jarvis && cd jarvis
 ## Usage
 
 ```sh
+jarvis setup                # interactive first-time wizard (recommended)
 jarvis doctor               # check what's installed
 jarvis test-agent "hi"      # ping the configured agent (no audio)
 jarvis test-tts             # speak a phrase
 jarvis test-stt --seconds 4 # record + transcribe
 jarvis listen               # one full turn: record → STT → agent → speak
 ```
+
+### First-time setup
+
+`jarvis setup` walks you through:
+
+1. **Language** — auto-detected from `$LANG`. English defaults to `en-GB`
+   and Spanish to `es-ES` (override at any step).
+2. **Whisper model** — pick from a curated list (tiny → large-v3), shown
+   with size and approximate RAM. Downloaded to
+   `~/.local/share/jarvis/whisper/`.
+3. **Piper voice** — fetched live from the rhasspy/piper-voices catalog
+   and filtered by your language. Downloaded on first use.
+4. **AI agent** — Claude / OpenAI / Gemini / Warp / shell, with prompts
+   for API keys when relevant.
+
+Re-run `jarvis setup` any time to change those choices.
 
 Bind `jarvis listen` to a global hotkey in your WM:
 
@@ -138,6 +155,12 @@ model = "gpt-4o-mini"
 name  = "gemini"
 model = "gemini-1.5-flash"
 
+# Warp (oz CLI)
+[agent]
+name    = "warp"
+model   = "claude-3.7-sonnet"   # any model your Warp account exposes
+# Expects WARP_API_KEY in env.
+
 # Ollama / any CLI
 [agent]
 name    = "shell"
@@ -145,7 +168,7 @@ command = ["ollama", "run", "llama3"]
 ```
 
 API keys come from the environment: `OPENAI_API_KEY`, `GEMINI_API_KEY`,
-`ANTHROPIC_API_KEY`. The systemd unit passes them through automatically.
+`ANTHROPIC_API_KEY`, `WARP_API_KEY`. The systemd unit passes them through automatically.
 
 ## Service
 

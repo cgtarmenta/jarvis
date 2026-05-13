@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Warp `oz` agent (`name = "warp"`): wraps `oz agent run --prompt …`, with
+  optional `model`, `profile`, `cwd`, and `api_key` overrides. Auto-detects
+  the binary among `oz`, `oz-preview`, and the deprecated `warp-cli`.
+  Doctor reports the binary and `WARP_API_KEY` presence.
+- `jarvis setup` interactive wizard: detects `$LANG`, proposes a Whisper
+  model (with download), filters Piper voices by language and downloads
+  the chosen one on first use, walks the user through agent selection +
+  API key, and writes the final config to disk. Defaults to **en-GB** for
+  English and **es-ES** for Spanish rather than the US variants.
+- Doctor now suggests `jarvis setup` when the Whisper model file is
+  missing.
+
 ## [0.1.0] - 2026-05-13
 
 ### Added
