@@ -14,6 +14,7 @@
 //! 400–900 ms on CPU and 200–400 ms with a GPU build. For a wake word
 //! that's acceptable; for press-to-talk it would not be.
 
+use std::collections::VecDeque;
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
 
@@ -108,6 +109,25 @@ impl WakeBackend for WhisperWake {
         let mut in_speech = false;
         let mut speech_start_chunks = 0usize;
 
+        // Pre-roll ring: keeps the last ``preroll_seconds`` worth of PCM
+        // while we're idle, so when speech triggers we prepend it to the
+        // segment and don't lose the consonant onset of the wake word.
+        let preroll_chunks = ((self.cfg.preroll_seconds * 1000.0) as usize).max(100) / 100;
+        let mut preroll: VecDeque<Vec<i16>> = VecDeque::with_capacity(preroll_chunks);
+
+        // Hysteresis thresholds. Trigger is the user-set value; sustain is
+        // a fraction of it (typically 0.5) — once we're inside an
+        // utterance, soft mid-word consonants stay below the trigger but
+        // above sustain, so the utterance isn't cut prematurely.
+        let trigger_threshold = self.cfg.vad_rms_threshold;
+        let sustain_threshold = trigger_threshold * self.cfg.sustain_factor.max(0.0);
+        info!(
+            trigger = %format!("{:.4}", trigger_threshold),
+            sustain = %format!("{:.4}", sustain_threshold),
+            preroll_chunks,
+            "VAD parameters"
+        );
+
         // Observability: every ALIVE_REPORT_CHUNKS we print a status line
         // showing the peak RMS observed in that window. Lets the user
         // calibrate `vad_rms_threshold` against their actual mic levels.
@@ -129,32 +149,51 @@ impl WakeBackend for WhisperWake {
                 }
 
                 let rms = compute_rms(&chunk_bytes);
-                let speaking = rms >= self.cfg.vad_rms_threshold;
+                // Hysteresis: high bar to enter, lower bar to stay.
+                let active = if in_speech {
+                    rms >= sustain_threshold
+                } else {
+                    rms >= trigger_threshold
+                };
 
                 peak_rms_window = peak_rms_window.max(rms);
                 chunks_since_report += 1;
                 if chunks_since_report >= ALIVE_REPORT_CHUNKS {
                     info!(
                         peak_rms = %format!("{:.4}", peak_rms_window),
-                        threshold = self.cfg.vad_rms_threshold,
+                        trigger = %format!("{:.4}", trigger_threshold),
                         "still listening (last 10s)"
                     );
                     chunks_since_report = 0;
                     peak_rms_window = 0.0;
                 }
 
-                if speaking {
+                // Decode the chunk to i16 samples once; reused below for
+                // both the pre-roll ring and (potentially) the segment.
+                let pcm = decode_chunk_to_i16(&chunk_bytes);
+
+                if active {
                     if !in_speech {
-                        info!(rms = %format!("{:.4}", rms), "speech started");
+                        info!(
+                            rms = %format!("{:.4}", rms),
+                            preroll_samples = preroll.iter().map(|c| c.len()).sum::<usize>(),
+                            "speech started"
+                        );
                         speech_start_chunks = 0;
+                        // Flush pre-roll into segment first so the leading
+                        // edge of the word isn't lost. Pre-roll is then
+                        // empty until next idle period.
+                        for c in preroll.drain(..) {
+                            extend_capped(&mut segment, &c, max_samples);
+                        }
                     }
                     silence_run = 0;
                     in_speech = true;
                     speech_start_chunks += 1;
-                    append_i16_samples(&mut segment, &chunk_bytes, max_samples);
+                    extend_capped(&mut segment, &pcm, max_samples);
                 } else if in_speech {
                     silence_run += 1;
-                    append_i16_samples(&mut segment, &chunk_bytes, max_samples);
+                    extend_capped(&mut segment, &pcm, max_samples);
                     if silence_run >= silence_chunks_threshold || segment.len() >= max_samples {
                         info!(
                             speech_chunks = speech_start_chunks,
@@ -175,8 +214,15 @@ impl WakeBackend for WhisperWake {
                             drain_for_ms(&mut stdout, &mut chunk_bytes, 500)?;
                         }
                     }
+                } else {
+                    // Idle (below sustain). Keep this chunk in the
+                    // pre-roll ring so when speech *next* triggers we
+                    // have the leading audio ready to prepend.
+                    if preroll.len() >= preroll_chunks {
+                        preroll.pop_front();
+                    }
+                    preroll.push_back(pcm);
                 }
-                // Else: silence with no preceding speech — nothing to do.
             }
             Ok(())
         })();
@@ -268,13 +314,23 @@ fn compute_rms(bytes: &[u8]) -> f32 {
     (mean.sqrt() / i16::MAX as f64) as f32
 }
 
-fn append_i16_samples(dst: &mut Vec<i16>, src_bytes: &[u8], cap_samples: usize) {
-    for pair in src_bytes.chunks_exact(2) {
-        if dst.len() >= cap_samples {
-            break;
-        }
-        dst.push(i16::from_le_bytes([pair[0], pair[1]]));
+/// Decode a raw little-endian 16-bit mono PCM chunk into a `Vec<i16>`.
+/// Allocates one Vec per chunk; at 100 ms/chunk and 16 kHz this is 1600
+/// samples (3.2 kB) ten times a second — well below anything to worry
+/// about and dramatically simpler than maintaining a shared ring of bytes.
+fn decode_chunk_to_i16(bytes: &[u8]) -> Vec<i16> {
+    bytes
+        .chunks_exact(2)
+        .map(|p| i16::from_le_bytes([p[0], p[1]]))
+        .collect()
+}
+
+fn extend_capped(dst: &mut Vec<i16>, src: &[i16], cap_samples: usize) {
+    if dst.len() >= cap_samples {
+        return;
     }
+    let take = (cap_samples - dst.len()).min(src.len());
+    dst.extend_from_slice(&src[..take]);
 }
 
 fn write_wav(path: &std::path::Path, samples: &[i16]) -> Result<()> {

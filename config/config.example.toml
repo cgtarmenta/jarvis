@@ -32,13 +32,25 @@ speak_responses = true       # set false to print replies only (no TTS)
 #   "openwakeword"  pre-trained models (hey_jarvis, alexa, ...) (ROADMAP).
 #   "rustpotter"    trained from your own voice samples (ROADMAP).
 [wake]
-enabled           = false
-backend           = "none"
-phrases           = ["jarvis"]
-vad_rms_threshold = 0.02    # 0.015 catches whispers; 0.05 ignores soft talk
-silence_seconds   = 0.8     # trailing silence that ends an utterance
+enabled            = false
+backend            = "none"
+phrases            = ["jarvis"]
+# VAD trigger RMS. 0.015 catches whispers; 0.05 ignores soft talk.
+# Once *in* an utterance, the sustain threshold (= trigger * sustain_factor)
+# takes over so soft consonants (m, n, t, s) don't cut the word short.
+vad_rms_threshold  = 0.02
+sustain_factor     = 0.5
+# Pre-roll ring of leading audio. Without this the first ~100 ms of the
+# word — the consonant onset — gets clipped because RMS hasn't crossed
+# the trigger yet ("mutombo" → "Combo").
+preroll_seconds    = 0.3
+silence_seconds    = 0.8    # trailing silence that ends an utterance
 max_listen_seconds = 3.0    # cap on one utterance before forced transcribe
-cooldown_seconds  = 2.0
+cooldown_seconds   = 2.0
+# Optional: use a smaller/faster Whisper model for the always-on wake loop
+# while [stt].model stays a heavier one for the actual command. Recommended
+# pairing: stt.model = large-v3 + wake.stt_model_override = base/tiny.
+# stt_model_override = "/home/you/.local/share/jarvis/whisper/ggml-base.bin"
 # Optional: use a smaller/faster Whisper model for the always-on wake loop
 # while [stt].model stays a heavier one for the actual command. Recommended
 # pairing: stt.model = large-v3 + wake.stt_model_override = base/tiny.

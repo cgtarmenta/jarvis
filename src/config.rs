@@ -89,8 +89,22 @@ pub struct WakeConfig {
     /// Empty for `backend = "none"`; required otherwise.
     pub phrases: Vec<String>,
     /// RMS threshold for the energy VAD: anything below counts as silence.
-    /// Range: 0.0 (everything is speech) — 1.0 (nothing is). Sane: 0.02–0.1.
+    /// Range: 0.0 (everything is speech) — 1.0 (nothing is). Sane: 0.015–0.05.
+    /// This is the *trigger* threshold — once speech starts, the sustain
+    /// threshold (threshold * `sustain_factor`) takes over so soft
+    /// consonants in the middle of a word don't cut the utterance short.
     pub vad_rms_threshold: f32,
+    /// Multiplier applied to `vad_rms_threshold` while a speech segment is
+    /// already in progress. 0.5 means "once you've started talking, half
+    /// the threshold is enough to keep me listening" — classic noise-gate
+    /// hysteresis. Set to 1.0 to disable the hysteresis behaviour.
+    pub sustain_factor: f32,
+    /// Audio (in seconds) kept in a rolling pre-roll buffer and prepended
+    /// to each captured utterance when speech is detected. Without this,
+    /// the first ~100 ms of every word — where the VAD threshold is just
+    /// being crossed — gets clipped, so "mutombo" becomes "Combo" and
+    /// whisper hallucinates. 0.3 s catches typical consonant onsets.
+    pub preroll_seconds: f32,
     /// Trailing silence (seconds) that ends a candidate utterance and
     /// triggers transcription.
     pub silence_seconds: f32,
@@ -117,6 +131,8 @@ impl Default for WakeConfig {
             // distance without firing on typing/HVAC noise. The old 0.03
             // default required users to almost-shout into the mic.
             vad_rms_threshold: 0.02,
+            sustain_factor: 0.5,
+            preroll_seconds: 0.3,
             silence_seconds: 0.8,
             max_listen_seconds: 3.0,
             cooldown_seconds: 2.0,
