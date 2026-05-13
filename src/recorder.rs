@@ -406,10 +406,28 @@ pub fn record_with_onset(cfg: &RecordConfig, onset_window_secs: f32) -> Result<O
 }
 
 /// Spawn a recorder writing raw 16-bit mono PCM at 16 kHz to stdout. The
-/// caller is expected to SIGTERM the child when finished. We prefer
-/// ffmpeg (clean raw output) then parecord / arecord. Mirrors the wake
-/// backend's setup so behaviour is consistent across the codebase.
+/// caller is expected to SIGTERM the child when finished. Preference
+/// order is **parecord → ffmpeg → arecord**, deliberately *opposite*
+/// to the wake backend's order. The wake backend already holds an
+/// ffmpeg-on-pulse continuous recorder open across wake_cb; if the
+/// follow-up turn opens a *second* ffmpeg-on-pulse, ffmpeg's pulse
+/// input module gets confused about packet timing — observed in live
+/// testing on 2026-05-13 as a torrent of "Application provided
+/// invalid, non monotonically increasing dts" errors *and* a
+/// systematically-broken onset detection (the second ffmpeg
+/// processes corrupted audio chunks that never cross threshold).
+/// `parecord` is a native pulse client and is much happier sharing
+/// the mic with another consumer, so we try it first.
 fn spawn_raw_pcm_recorder() -> Result<std::process::Child> {
+    if which::which("parecord").is_ok() {
+        return Command::new("parecord")
+            .args(["--raw", "--format=s16le", "--rate=16000", "--channels=1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("spawning parecord for onset-gated recording");
+    }
     if which::which("ffmpeg").is_ok() {
         return Command::new("ffmpeg")
             .args([
@@ -433,15 +451,6 @@ fn spawn_raw_pcm_recorder() -> Result<std::process::Child> {
             .stderr(Stdio::null())
             .spawn()
             .context("spawning ffmpeg for onset-gated recording");
-    }
-    if which::which("parecord").is_ok() {
-        return Command::new("parecord")
-            .args(["--raw", "--format=s16le", "--rate=16000", "--channels=1"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("spawning parecord for onset-gated recording");
     }
     if which::which("arecord").is_ok() {
         return Command::new("arecord")
