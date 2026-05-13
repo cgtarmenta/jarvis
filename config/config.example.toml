@@ -67,10 +67,11 @@ backend         = "auto"
 sample_rate     = 16000
 channels        = 1
 max_seconds     = 15.0
-silence_seconds = 3.0           # how long sustained silence must last to
+silence_seconds = 4.0           # how long sustained silence must last to
                                 # end the turn. Long enough that natural
-                                # mid-thought pauses don't truncate; lower
-                                # to ~1.5 if you speak in tight bursts.
+                                # mid-thought "let me find the word" pauses
+                                # don't truncate; lower to ~1.5 if you speak
+                                # in tight bursts.
 silence_threshold_db = -40.0   # dBFS below which audio counts as silence.
                                 # Default tuned for normal USB headset / laptop
                                 # mic (speech ~-25 to -33 dBFS, idle ~-44 to

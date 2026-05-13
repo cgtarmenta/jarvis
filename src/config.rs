@@ -172,13 +172,14 @@ impl Default for RecordConfig {
             sample_rate: 16_000,
             channels: 1,
             max_seconds: 15.0,
-            // 3.0 s of sustained silence ends the turn. Multiple
-            // bumps got us here: 1.5 was the original spec value
-            // (cut multi-clause turns); 2.5 worked for terse users
-            // but still clipped speakers who pause longer
-            // mid-thought. 3.0 covers natural conversational pacing
-            // without making truly-finished turns feel sluggish.
-            silence_seconds: 3.0,
+            // 4.0 s of sustained silence ends the turn. Multiple
+            // bumps got us here: 1.5 (original) → 2.5 → 3.0 → 4.0.
+            // 4.0 covers the "let me find the right word" pause
+            // that some users naturally do mid-sentence, at the
+            // cost of an extra second of perceived latency on
+            // finished turns. Still feels conversational rather
+            // than sluggish in live testing.
+            silence_seconds: 4.0,
             // -40 dBFS: live testing showed that even at -35 the user's
             // natural inter-word RMS dips (consonant articulation, brief
             // breaths) fell below threshold and the onset detector
