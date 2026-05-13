@@ -80,6 +80,13 @@ enum Cmd {
         /// voice without editing config.
         #[arg(long)]
         voice: Option<String>,
+        /// Return immediately and play the TTS in a detached background
+        /// process. Use this inside Claude Code Stop hooks, cron jobs,
+        /// or anywhere the parent is blocked waiting for the command to
+        /// exit — without `--detach`, hooks hang for the duration of
+        /// the spoken phrase.
+        #[arg(long)]
+        detach: bool,
     },
 
     /// One-shot STT: record N seconds, transcribe, print the transcript.
@@ -254,7 +261,11 @@ pub fn run() -> Result<()> {
         Cmd::EditConfig => cmd_edit_config(&cfg_path),
         Cmd::Doctor => cmd_doctor(&cfg, &cfg_path),
         Cmd::TestTts { text } => cmd_test_tts(&cfg, &text),
-        Cmd::Say { text, voice } => cmd_say(&cfg, text, voice.as_deref()),
+        Cmd::Say {
+            text,
+            voice,
+            detach,
+        } => cmd_say(&cfg, text, voice.as_deref(), detach),
         Cmd::TestStt { seconds } => cmd_test_stt(&cfg, seconds),
         Cmd::TestAgent { prompt } => cmd_test_agent(&cfg, &prompt.join(" ")),
         Cmd::Session { cmd } => cmd_session(cmd),
@@ -520,7 +531,42 @@ fn cmd_test_tts(cfg: &JarvisConfig, text: &str) -> Result<()> {
 /// cargo build && jarvis say "build ok"
 /// claude --print 'summarise' | jarvis say -
 /// ```
-fn cmd_say(cfg: &JarvisConfig, text: Vec<String>, voice: Option<&str>) -> Result<()> {
+fn cmd_say(cfg: &JarvisConfig, text: Vec<String>, voice: Option<&str>, detach: bool) -> Result<()> {
+    // `--detach` re-execs ourselves without the flag, redirects all
+    // stdio to /dev/null, and exits the parent right after spawning.
+    // The child then runs the normal synchronous TTS path while
+    // whatever parent invoked us (a Claude Code Stop hook, cron, etc.)
+    // gets exit 0 instantly. Without this, the hook hangs until the
+    // spoken phrase finishes — which Claude Code shows as "thinking".
+    if detach {
+        let exe = std::env::current_exe().context("locating own binary for --detach")?;
+        // Reconstruct argv without --detach so the child doesn't loop.
+        let mut child_args: Vec<String> = std::env::args()
+            .skip(1)
+            .filter(|a| a != "--detach")
+            .collect();
+        // If the user wrote `jarvis say --detach -` with stdin, we
+        // need to materialise stdin *now* (parent's stdin) before we
+        // redirect the child's stdin to /dev/null, otherwise the
+        // text is lost. Convert `-` into the literal text we read.
+        if child_args.iter().any(|a| a == "-") {
+            let buffered = read_stdin()?;
+            for arg in child_args.iter_mut() {
+                if arg == "-" {
+                    *arg = buffered.clone();
+                }
+            }
+        }
+        std::process::Command::new(exe)
+            .args(&child_args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .context("spawning detached jarvis say")?;
+        return Ok(());
+    }
+
     // Resolve the text. Either:
     //   * no args, or the single arg `-`  → read stdin until EOF (pipes)
     //   * positional args                 → join with spaces

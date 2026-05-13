@@ -219,7 +219,10 @@ jarvis say --voice en_GB-alan-medium "tests passed"
 ### Hook into Claude Code
 
 Edit `~/.claude/settings.json` to fire `jarvis say` on every
-[`Stop` event](https://docs.claude.com/en/docs/claude-code/hooks):
+[`Stop` event](https://docs.claude.com/en/docs/claude-code/hooks).
+**Always pass `--detach`** — without it the hook blocks for the
+duration of the spoken phrase and Claude Code shows "thinking"
+until the audio finishes:
 
 ```json
 {
@@ -228,7 +231,7 @@ Edit `~/.claude/settings.json` to fire `jarvis say` on every
       {
         "matcher": "",
         "hooks": [
-          { "type": "command", "command": "jarvis say \"Listo, tarea completada.\"" }
+          { "type": "command", "command": "jarvis say --detach \"Listo, tarea completada.\"" }
         ]
       }
     ]
@@ -238,12 +241,13 @@ Edit `~/.claude/settings.json` to fire `jarvis say` on every
 
 For a dynamic one-sentence summary instead of a fixed phrase, parse
 the hook's JSON-on-stdin (Claude Code passes `session_id` there, not
-as an env var) and pipe the answer through. Requires `jq`:
+as an env var) and pipe the answer through. Requires `jq`. The
+`--detach` matters here too:
 
 ```json
 {
   "type": "command",
-  "command": "jq -r '.session_id' | xargs -I{} claude --print --resume {} 'In one short sentence, what did you just finish?' | jarvis say -"
+  "command": "jq -r '.session_id' | xargs -I{} claude --print --resume {} 'In one short sentence, what did you just finish?' | jarvis say --detach -"
 }
 ```
 
