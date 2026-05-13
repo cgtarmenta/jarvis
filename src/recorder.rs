@@ -106,9 +106,15 @@ fn build_ffmpeg(cfg: &RecordConfig, out: &Path) -> Vec<String> {
         cfg.channels.to_string(),
         "-ar".into(),
         cfg.sample_rate.to_string(),
+        // `silenceremove` *does* support auto-termination on trailing
+        // silence, but the parameter is named `stop_duration` — not
+        // `stop_silence` (an earlier version of this code used the wrong
+        // name and ffmpeg silently ignored it, leaving recordings to run
+        // for the full `max_seconds`). When `stop_periods` is reached the
+        // filter graph reports EOF and ffmpeg exits.
         "-af".into(),
         format!(
-            "silenceremove=stop_periods=1:stop_silence={}:stop_threshold=-40dB",
+            "silenceremove=stop_periods=1:stop_duration={}:stop_threshold=-40dB",
             cfg.silence_seconds
         ),
         "-t".into(),

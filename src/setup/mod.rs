@@ -91,6 +91,36 @@ pub fn run() -> Result<()> {
         defaults.whisper_language.clone()
     };
 
+    // Optional second model just for the wake loop. We only offer this
+    // when the main model is medium/large — for tiny/base/small the
+    // savings don't justify the extra disk. Setting an override here
+    // populates `[wake].stt_model_override` so the always-on listener
+    // uses the smaller model while `jarvis listen` keeps the heavy one.
+    if matches!(model.id, "medium" | "large-v3") {
+        println!();
+        let want_separate = Confirm::with_theme(&theme)
+            .with_prompt(format!(
+                "You picked `{}` ({} MB) — heavy for the always-on wake loop. \
+                 Use a smaller model just for wake-word detection?",
+                model.id, model.size_mb
+            ))
+            .default(true)
+            .interact()?;
+        if want_separate {
+            let wake_model = choose_wake_model(&theme, &defaults)?;
+            let wake_path = whisper::ensure_downloaded(&wake_model)
+                .with_context(|| format!("downloading wake model {}", wake_model.id))?;
+            info!(
+                wake_model = %wake_path.display(),
+                main_model = %model_path.display(),
+                "wake-loop model decoupled from main STT"
+            );
+            cfg.wake.stt_model_override = Some(wake_path.to_string_lossy().into_owned());
+        } else {
+            cfg.wake.stt_model_override = None;
+        }
+    }
+
     // 3. TTS ---------------------------------------------------------------
     println!();
     println!("== Text-to-speech (piper) ==");
@@ -226,6 +256,29 @@ fn ask_locale(theme: &ColorfulTheme) -> Result<Locale> {
 // ---------------------------------------------------------------------------
 // Whisper step
 // ---------------------------------------------------------------------------
+
+/// Pick a *wake-loop* Whisper model. We filter the catalog to the fast
+/// end (tiny / base / small) — medium and large make no sense in an
+/// always-on listener and would defeat the point of the override.
+fn choose_wake_model(theme: &ColorfulTheme, defaults: &Defaults) -> Result<ModelInfo> {
+    let mut catalog: Vec<ModelInfo> = whisper::catalog()
+        .into_iter()
+        .filter(|m| matches!(m.id, "tiny" | "base" | "small"))
+        .filter(|m| !m.english_only || defaults.whisper_language == "en")
+        .collect();
+    catalog.sort_by_key(|m| !m.id.starts_with("base"));
+    let labels: Vec<String> = catalog.iter().map(ModelInfo::label).collect();
+    let default_idx = catalog
+        .iter()
+        .position(|m| m.id.starts_with("base"))
+        .unwrap_or(0);
+    let idx = Select::with_theme(theme)
+        .with_prompt("Wake-loop model (will be downloaded to the same data dir)")
+        .items(&labels)
+        .default(default_idx)
+        .interact()?;
+    Ok(catalog[idx].clone())
+}
 
 fn choose_whisper_model(theme: &ColorfulTheme, defaults: &Defaults) -> Result<ModelInfo> {
     let want_english_only = defaults.whisper_language == "en"
