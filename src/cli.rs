@@ -85,6 +85,14 @@ enum Cmd {
         /// How long to keep listening (seconds). Defaults to 30.
         #[arg(long, default_value_t = 30)]
         seconds: u64,
+        /// Override `[wake].vad_rms_threshold` for this run only. Useful
+        /// when iterating: each run prints the peak RMS observed, you
+        /// adjust here, retry — no config edits between attempts.
+        #[arg(long)]
+        threshold: Option<f32>,
+        /// Override `[wake].phrases` for this run only. Comma-separated.
+        #[arg(long)]
+        phrases: Option<String>,
     },
 }
 
@@ -112,7 +120,11 @@ pub fn run() -> Result<()> {
         Cmd::TestTts { text } => cmd_test_tts(&cfg, &text),
         Cmd::TestStt { seconds } => cmd_test_stt(&cfg, seconds),
         Cmd::TestAgent { prompt } => cmd_test_agent(&cfg, &prompt.join(" ")),
-        Cmd::TestWake { seconds } => cmd_test_wake(&cfg, seconds),
+        Cmd::TestWake {
+            seconds,
+            threshold,
+            phrases,
+        } => cmd_test_wake(&cfg, seconds, threshold, phrases.as_deref()),
     }
 }
 
@@ -349,16 +361,40 @@ fn cmd_test_stt(cfg: &JarvisConfig, seconds: f32) -> Result<()> {
     Ok(())
 }
 
-fn cmd_test_wake(cfg: &JarvisConfig, seconds: u64) -> Result<()> {
+fn cmd_test_wake(
+    cfg: &JarvisConfig,
+    seconds: u64,
+    threshold_override: Option<f32>,
+    phrases_override: Option<&str>,
+) -> Result<()> {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    let backend = crate::wake::build(cfg.wake.clone(), cfg.stt.clone())?;
+    // Apply CLI overrides on a clone — the on-disk config is left alone so
+    // users can iterate freely: `test-wake --threshold 0.015`,
+    // `test-wake --threshold 0.01`, etc., without ever touching config.toml.
+    let mut wake_cfg = cfg.wake.clone();
+    if let Some(t) = threshold_override {
+        wake_cfg.vad_rms_threshold = t;
+    }
+    if let Some(p) = phrases_override {
+        wake_cfg.phrases = p
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+
+    let backend = crate::wake::build(wake_cfg.clone(), cfg.stt.clone())?;
     println!(
         "▶ Listening for {seconds}s with backend={:?}, phrases={:?}, threshold={}",
         backend.name(),
-        cfg.wake.phrases,
-        cfg.wake.vad_rms_threshold
+        wake_cfg.phrases,
+        wake_cfg.vad_rms_threshold
+    );
+    println!(
+        "  STT model={}, language={}",
+        cfg.stt.model, cfg.stt.language
     );
     println!(
         "  Say one of the phrases or wait for timeout. The log below will show \
