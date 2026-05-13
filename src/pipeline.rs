@@ -14,15 +14,58 @@ use anyhow::{Context, Result};
 use tracing::{info, warn};
 
 use crate::agents;
-use crate::config::JarvisConfig;
+use crate::config::{JarvisConfig, RecordConfig};
 use crate::recorder;
 use crate::session::{self, Role};
 use crate::stt;
 use crate::tts;
 
+/// Per-turn overrides over what is normally read from `JarvisConfig`.
+///
+/// The follow-up listening window (spec 0007) needs two adjustments to the
+/// standard turn: skip the audible cue (we are already mid-conversation, the
+/// cue is friction) and shorten the recording window so an empty follow-up
+/// doesn't block the daemon for the full default duration. Rather than add
+/// a half-dozen scattered boolean parameters to [`run_once`] we route both
+/// through a single `TurnOptions`.
+#[derive(Debug, Clone, Default)]
+pub struct TurnOptions {
+    /// Override the [`RecordConfig`] for this turn only. Mostly used so
+    /// the daemon's follow-up loop can shorten `max_seconds` to the
+    /// follow-up window without mutating the user's main config.
+    pub record_override: Option<RecordConfig>,
+    /// Whether to play the "I'm listening" cue at the start of the turn.
+    /// Follow-up turns pass `false`; wake-triggered and hotkey turns
+    /// pass `true` (the default).
+    pub play_cue: bool,
+}
+
+impl TurnOptions {
+    /// Default options for the primary wake/hotkey turn: cue on, no
+    /// record override.
+    pub fn primary() -> Self {
+        Self {
+            record_override: None,
+            play_cue: true,
+        }
+    }
+}
+
+/// Run a single voice-assistant turn with default options (cue on, normal
+/// record config). Convenience wrapper around [`run_turn`] so existing
+/// callers (`jarvis listen`, the daemon's first turn) keep their tight
+/// signature.
+pub fn run_once(cfg: &JarvisConfig) -> Result<Option<String>> {
+    run_turn(cfg, TurnOptions::primary())
+}
+
 /// Run a single voice-assistant turn. Returns the spoken reply (or `None` if
 /// nothing was transcribed).
-pub fn run_once(cfg: &JarvisConfig) -> Result<Option<String>> {
+///
+/// `opts` lets callers tweak per-turn behavior — most notably, the daemon's
+/// follow-up loop skips the cue and shortens the recording window. See
+/// [`TurnOptions`] for the available knobs.
+pub fn run_turn(cfg: &JarvisConfig, opts: TurnOptions) -> Result<Option<String>> {
     let stt_engine = stt::build(cfg.stt.clone())?;
     let agent = agents::build(cfg.agent.clone())?;
     let tts_engine = if cfg.speak_responses {
@@ -38,11 +81,18 @@ pub fn run_once(cfg: &JarvisConfig) -> Result<Option<String>> {
     // of the wake utterance ("...por favor") leaks into the command
     // transcript. The cue runs synchronously so the delay is a natural
     // by-product of speaking the prompt rather than a dead pause.
-    play_listening_cue();
-    thread::sleep(Duration::from_millis(250));
+    //
+    // Follow-up turns (spec 0007) skip the cue: we are already
+    // mid-conversation, the cue would add friction instead of confidence.
+    if opts.play_cue {
+        play_listening_cue();
+        thread::sleep(Duration::from_millis(250));
+    }
+
+    let record_cfg = opts.record_override.as_ref().unwrap_or(&cfg.record);
 
     info!("recording");
-    let wav = recorder::record_to_wav(&cfg.record)?;
+    let wav = recorder::record_to_wav(record_cfg)?;
 
     let result = (|| -> Result<Option<String>> {
         info!("transcribing");
@@ -188,4 +238,33 @@ fn play_listening_cue() {
     use std::io::Write;
     let _ = std::io::stderr().write_all(b"\x07");
     let _ = std::io::stderr().flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Spec 0007: the primary-turn options must play the cue and not
+    /// override the recorder. This is the contract `jarvis listen` and
+    /// the daemon's wake-triggered first turn rely on; the follow-up
+    /// chain explicitly diverges and is verified by reading the daemon
+    /// code (it constructs a `TurnOptions` with `play_cue: false` and a
+    /// shortened record override).
+    #[test]
+    fn primary_turn_options_play_cue_and_use_default_recorder() {
+        let opts = TurnOptions::primary();
+        assert!(opts.play_cue);
+        assert!(opts.record_override.is_none());
+    }
+
+    /// Spec 0007: a zero-value `Default` is intentionally muted — it
+    /// represents "no cue, no override" which is what a follow-up turn
+    /// wants. Catches accidental `play_cue: true` slipping back into
+    /// the `Default` impl during refactors.
+    #[test]
+    fn default_turn_options_match_followup_shape() {
+        let opts = TurnOptions::default();
+        assert!(!opts.play_cue);
+        assert!(opts.record_override.is_none());
+    }
 }

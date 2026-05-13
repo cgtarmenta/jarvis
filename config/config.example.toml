@@ -178,9 +178,13 @@ name = "claude"
 # works without re-stating context. Saying one of the reset phrases below
 # wipes the session by voice (forwarded to NO agent — it's caught locally).
 [session]
-enabled       = true
-ttl_seconds   = 1800        # session expires after 30 min idle (0 = never)
-max_turns     = 30          # keep at most this many turns in the prompt
+enabled              = true
+ttl_seconds          = 1800     # session expires after 30 min idle (0 = never)
+max_turns            = 30       # keep at most this many turns in the prompt
+followup_window_secs = 6.0      # after each daemon turn, keep listening this
+                                # long without re-requiring the wake word (0
+                                # disables follow-up; conversations chain
+                                # naturally for short clarifications)
 reset_phrases = [
     "olvida", "olvidalo", "olvida todo",
     "nueva conversacion", "nueva conversación",

@@ -13,7 +13,7 @@ use signal_hook::consts::{SIGINT, SIGTERM};
 use tracing::info;
 
 use crate::config::JarvisConfig;
-use crate::pipeline::run_once;
+use crate::pipeline::{TurnOptions, run_once, run_turn};
 use crate::wake;
 
 pub fn run(cfg: JarvisConfig) -> Result<()> {
@@ -47,8 +47,46 @@ pub fn run(cfg: JarvisConfig) -> Result<()> {
         if let Err(err) = run_once(&cfg_for_callback) {
             // One bad turn shouldn't kill the daemon — log and keep going.
             tracing::error!("turn failed: {err:#}");
+            return;
         }
+        // Spec 0007: follow-up listening. After a wake-triggered turn,
+        // keep the mic open for a short window so short clarifications
+        // ("¿y en Tokio?") don't require re-saying the wake word.
+        // Empty follow-up captures or any error terminate the chain
+        // and return us to wake-word gating.
+        run_followup_chain(&cfg_for_callback, &stop_for_cb);
     };
 
     backend.run(&mut wake_cb, &|| stop_for_check.load(Ordering::Relaxed))
+}
+
+/// Loop on follow-up turns until the user goes silent (`run_turn` returns
+/// `Ok(None)`), an error occurs, or shutdown is requested. The follow-up
+/// recorder uses `session.followup_window_secs` as its `max_seconds`, and
+/// skips the audible cue — both indicators that we are continuing a
+/// conversation rather than starting one.
+fn run_followup_chain(cfg: &JarvisConfig, stop: &Arc<AtomicBool>) {
+    let window = cfg.session.followup_window_secs;
+    if window <= 0.0 {
+        return;
+    }
+    let mut record_cfg = cfg.record.clone();
+    record_cfg.max_seconds = window;
+    let opts = TurnOptions {
+        record_override: Some(record_cfg),
+        play_cue: false,
+    };
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        match run_turn(cfg, opts.clone()) {
+            Ok(Some(_)) => continue,
+            Ok(None) => return,
+            Err(err) => {
+                tracing::error!("follow-up turn failed: {err:#}");
+                return;
+            }
+        }
+    }
 }

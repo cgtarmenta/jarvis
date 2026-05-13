@@ -281,6 +281,12 @@ pub struct SessionConfig {
     /// being forwarded to the agent. Lets the user start over without
     /// going to the terminal.
     pub reset_phrases: Vec<String>,
+    /// After each successful agent turn in daemon (wake-word) mode, how
+    /// long to keep listening for a follow-up utterance without
+    /// requiring the wake word again. 0 disables the follow-up window
+    /// entirely. Short clarifications ("¿y en Tokio?") chain naturally
+    /// without re-saying the wake phrase.
+    pub followup_window_secs: f32,
 }
 
 impl Default for SessionConfig {
@@ -289,6 +295,7 @@ impl Default for SessionConfig {
             enabled: true,
             ttl_seconds: 30 * 60,
             max_turns: 30,
+            followup_window_secs: 6.0,
             reset_phrases: vec![
                 "olvida".into(),
                 "olvidalo".into(),

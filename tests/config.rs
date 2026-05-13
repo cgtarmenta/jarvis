@@ -68,6 +68,68 @@ fn defaults_are_sensible() {
     assert!(!cfg.wake.enabled);
 }
 
+/// Spec 0007: the follow-up window must default to 6.0s so the feature
+/// is on out of the box. A zero default would silently disable a
+/// behavior users expect from a freshly-installed Jarvis.
+#[test]
+fn followup_window_default_is_six_seconds() {
+    let cfg = JarvisConfig::default();
+    assert!(
+        (cfg.session.followup_window_secs - 6.0).abs() < f32::EPSILON,
+        "expected followup_window_secs default 6.0, got {}",
+        cfg.session.followup_window_secs
+    );
+}
+
+/// Spec 0007: setting `followup_window_secs = 0` in TOML must disable
+/// the follow-up loop. We round-trip a minimal config that includes
+/// the field and check it lands on the deserialised struct unchanged.
+#[test]
+#[serial]
+fn followup_window_zero_is_preserved() {
+    let tmp = TempDir::new().unwrap();
+    redirect_xdg(&tmp);
+    let cfg_path = tmp.path().join("config").join("jarvis").join("config.toml");
+    std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &cfg_path,
+        "config_version = 2\n\
+         log_level = \"INFO\"\n\
+         [session]\n\
+         followup_window_secs = 0.0\n",
+    )
+    .unwrap();
+    let cfg = config::load(&cfg_path).expect("parse followup=0");
+    assert_eq!(cfg.session.followup_window_secs, 0.0);
+}
+
+/// Spec 0007: a custom non-default window value round-trips intact.
+/// This catches schema typos (wrong field name, wrong type) that the
+/// `deny_unknown_fields` parse would surface as errors but that a
+/// missing default fallback could silently mask.
+#[test]
+#[serial]
+fn followup_window_custom_value_round_trips() {
+    let tmp = TempDir::new().unwrap();
+    redirect_xdg(&tmp);
+    let cfg_path = tmp.path().join("config").join("jarvis").join("config.toml");
+    std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &cfg_path,
+        "config_version = 2\n\
+         log_level = \"INFO\"\n\
+         [session]\n\
+         followup_window_secs = 12.5\n",
+    )
+    .unwrap();
+    let cfg = config::load(&cfg_path).expect("parse followup=12.5");
+    assert!(
+        (cfg.session.followup_window_secs - 12.5).abs() < f32::EPSILON,
+        "expected followup_window_secs 12.5, got {}",
+        cfg.session.followup_window_secs
+    );
+}
+
 #[test]
 #[serial]
 fn old_schema_config_fails_with_migration_hint() {
