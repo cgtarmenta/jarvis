@@ -12,7 +12,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use tracing::warn;
 
-use super::{Agent, opt_f64, opt_string, opt_string_vec};
+use super::claude_attach::{self, Attachment};
+use super::{Agent, opt_bool, opt_f64, opt_string, opt_string_vec};
 use crate::session::Turn;
 
 const DEFAULT_SYSTEM_PROMPT: &str = "You are a voice assistant. Reply concisely in 1-3 sentences unless the \
@@ -24,6 +25,11 @@ pub struct ClaudeAgent {
     system_prompt: Option<String>,
     extra_args: Vec<String>,
     cwd: Option<String>,
+    /// `[agent].auto_resume` — at every turn pick the newest Claude
+    /// session JSONL under `cwd`'s project namespace and pass it via
+    /// `--resume`. The cache-file attachment (when present) overrides
+    /// this entirely; see `claude_attach::resolve` for the priority.
+    auto_resume: bool,
     timeout: Duration,
 }
 
@@ -34,6 +40,7 @@ impl ClaudeAgent {
         let system_prompt = opt_string(&opts, "system_prompt", Some(DEFAULT_SYSTEM_PROMPT))?;
         let extra_args = opt_string_vec(&opts, "extra_args")?;
         let cwd = opt_string(&opts, "cwd", None)?;
+        let auto_resume = opt_bool(&opts, "auto_resume", false)?;
         let timeout_secs = opt_f64(&opts, "timeout", 60.0)?;
 
         if which::which(&binary).is_err() {
@@ -47,8 +54,18 @@ impl ClaudeAgent {
             system_prompt,
             extra_args,
             cwd,
+            auto_resume,
             timeout: Duration::from_secs_f64(timeout_secs.max(1.0)),
         })
+    }
+
+    /// Resolve the active `Attachment` once per turn. The cache state
+    /// file is consulted on every call (cheap; one fs::read) so the
+    /// user's `jarvis claude attach` change applies immediately without
+    /// restarting the daemon.
+    fn current_attachment(&self) -> Attachment {
+        let state = claude_attach::load_state().ok().flatten();
+        claude_attach::resolve(state.as_ref(), self.cwd.as_deref(), self.auto_resume)
     }
 }
 
@@ -60,6 +77,18 @@ impl Agent for ClaudeAgent {
     fn respond(&self, prompt: &str, history: &[Turn]) -> Result<String> {
         let mut cmd = Command::new(&self.binary);
         cmd.arg("--print");
+
+        // Session resume: if attached (pinned or auto-latest), pass
+        // `--resume <uuid>` so Claude Code loads the prior conversation
+        // (tool calls, file edits, system messages — full fidelity).
+        // We log which session is being resumed so the daemon log shows
+        // it for the user.
+        let attachment = self.current_attachment();
+        if let Some(uuid) = attachment.to_uuid() {
+            tracing::info!(session = %uuid, "claude --resume");
+            cmd.args(["--resume", &uuid]);
+        }
+
         if let Some(sp) = &self.system_prompt {
             cmd.args(["--append-system-prompt", sp]);
         }

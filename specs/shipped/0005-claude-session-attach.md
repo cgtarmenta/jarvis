@@ -1,10 +1,10 @@
 ---
 id: 0005
 title: Claude session attach
-status: active
+status: shipped
 owner: tadeo
 created: 2026-05-13
-shipped:
+shipped: 2026-05-13
 verifying:
   - cargo run -- claude sessions
   - cargo run -- claude attach --latest --cwd /tmp/fake-repo
@@ -57,31 +57,31 @@ in `jarvis claude sessions` output rather than try to lock the file.
 
 ## What
 
-- [ ] `[agent].auto_resume` (bool, default `false`) added to the
+- [x] `[agent].auto_resume` (bool, default `false`) added to the
       `claude` agent. When `true`, the agent picks the newest session
       JSONL in the project's session dir on every turn and passes
       `--resume <uuid>` to `claude --print`.
-- [ ] `[agent].cwd` already exists and is honoured as both Claude's
+- [x] `[agent].cwd` already exists and is honoured as both Claude's
       working dir AND the basis for the auto-resume project path.
       No new field needed.
-- [ ] A pinned-attachment state file at
+- [x] A pinned-attachment state file at
       `$XDG_CACHE_HOME/jarvis/claude-attach.toml` (single
       `session_id = "..."` or `auto_resume = true` + `cwd = "..."`)
       overrides `[agent]` config for the current session.
-- [ ] `jarvis claude sessions` lists every session under
+- [x] `jarvis claude sessions` lists every session under
       `~/.claude/projects/` newest-first, grouped by project, with
       mtime + size + first user message preview. Supports
       `--cwd <path>` to filter to one project.
-- [ ] `jarvis claude attach <uuid>` writes the state file pinning that
+- [x] `jarvis claude attach <uuid>` writes the state file pinning that
       UUID; subsequent `jarvis listen` / daemon turns resume it.
-- [ ] `jarvis claude attach --latest [--cwd <path>]` writes
+- [x] `jarvis claude attach --latest [--cwd <path>]` writes
       `auto_resume = true` + cwd to the state file.
-- [ ] `jarvis claude detach` deletes the state file (turn returns to
+- [x] `jarvis claude detach` deletes the state file (turn returns to
       whatever `[agent]` config says — `auto_resume` or stateless).
-- [ ] Doctor reports the current attachment (path of attached JSONL or
+- [x] Doctor reports the current attachment (path of attached JSONL or
       "stateless") so the user can see at a glance what session voice
       will hit.
-- [ ] CHANGELOG entry under `## [Unreleased]`.
+- [x] CHANGELOG entry under `## [Unreleased]`.
 
 ## How
 
@@ -132,6 +132,8 @@ matcher already lives — moving them out is fine when we add a third
 domain.
 
 ## Journal
+
+- 2026-05-13: shipped.
 
 - 2026-05-13: promoted to active.
 

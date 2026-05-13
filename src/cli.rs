@@ -112,6 +112,14 @@ enum Cmd {
         cmd: SpecCmd,
     },
 
+    /// Attach Jarvis's `claude` agent to a Claude Code session so each
+    /// voice turn continues a real CLI conversation (full tool-call and
+    /// file-edit context preserved via `claude --print --resume <id>`).
+    Claude {
+        #[command(subcommand)]
+        cmd: ClaudeCmd,
+    },
+
     /// Diagnostic: run the configured wake backend for N seconds with
     /// verbose logging (RMS readings, transcripts, match status). Use this
     /// to tune `[wake].vad_rms_threshold` and `[wake].phrases` without
@@ -139,6 +147,47 @@ enum SessionCmd {
     Reset,
     /// Print the absolute path to the session JSON file.
     Path,
+}
+
+#[derive(Subcommand, Debug)]
+enum ClaudeCmd {
+    /// List every Claude Code session under `~/.claude/projects/`,
+    /// newest first. With `--cwd`, restrict to one project.
+    Sessions {
+        /// Filter to the project at this working dir (encoded the same
+        /// way Claude Code itself encodes it on disk).
+        #[arg(long)]
+        cwd: Option<String>,
+        /// How many sessions to show. Default 20 to keep the list usable.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Pin Jarvis to a specific session UUID. Subsequent voice turns
+    /// pass `--resume <uuid>` to `claude --print`.
+    ///
+    /// Without arguments, prints the currently pinned attachment.
+    /// With `--latest`, instead saves auto-resume mode targeting the
+    /// session newest at each turn (so the pin moves forward as you
+    /// keep working in the same project).
+    Attach {
+        /// UUID (or unambiguous UUID prefix) of the session to pin.
+        uuid: Option<String>,
+        /// Save "always pick the newest session in `cwd`" instead of
+        /// pinning a specific UUID.
+        #[arg(long)]
+        latest: bool,
+        /// Working directory whose project namespace to attach to.
+        /// Required with `--latest` if no `[agent].cwd` is set; for
+        /// pinned UUIDs the cwd is recovered from the session's path.
+        #[arg(long)]
+        cwd: Option<String>,
+    },
+    /// Forget the pinned attachment. The claude agent reverts to
+    /// whatever `[agent]` config says (`auto_resume = true` keeps
+    /// auto-mode; otherwise the agent goes stateless).
+    Detach,
+    /// Print which session (if any) the daemon would resume right now.
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -202,6 +251,7 @@ pub fn run() -> Result<()> {
         Cmd::TestAgent { prompt } => cmd_test_agent(&cfg, &prompt.join(" ")),
         Cmd::Session { cmd } => cmd_session(cmd),
         Cmd::Spec { cmd } => cmd_spec(cmd),
+        Cmd::Claude { cmd } => cmd_claude(&cfg, cmd),
         Cmd::TestWake {
             seconds,
             threshold,
@@ -362,6 +412,33 @@ fn cmd_doctor(cfg: &JarvisConfig, cfg_path: &Path) -> Result<()> {
                 &format!("agent: {bin}"),
                 which::which(bin).is_ok(),
                 "Claude Code CLI",
+            );
+            // Surface the active claude session attachment so the user
+            // can confirm at a glance which conversation voice will hit.
+            use crate::agents::claude_attach;
+            let cfg_cwd = cfg.agent.options.get("cwd").and_then(|v| v.as_str());
+            let cfg_auto = cfg
+                .agent
+                .options
+                .get("auto_resume")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let state = claude_attach::load_state().ok().flatten();
+            let attachment = claude_attach::resolve(state.as_ref(), cfg_cwd, cfg_auto);
+            let detail = match &attachment {
+                claude_attach::Attachment::None => "stateless".to_string(),
+                claude_attach::Attachment::Pinned(uuid) => format!("pinned {uuid}"),
+                claude_attach::Attachment::Latest { cwd } => {
+                    match claude_attach::latest_session_for(cwd) {
+                        Some(s) => format!("auto-resume → {} ({})", s.uuid, cwd.display()),
+                        None => format!("auto-resume in {} (no session yet)", cwd.display()),
+                    }
+                }
+            };
+            line(
+                "claude attach",
+                !matches!(attachment, claude_attach::Attachment::None),
+                &detail,
             );
         }
         "openai" | "chatgpt" => {
@@ -750,4 +827,133 @@ fn print_spec_detail(s: &crate::specs::spec::Spec) {
     println!("{}", s.path.display());
     println!();
     println!("{}", s.serialize());
+}
+
+fn cmd_claude(cfg: &JarvisConfig, cmd: ClaudeCmd) -> Result<()> {
+    use crate::agents::claude_attach;
+    use std::path::Path;
+
+    // Read the configured claude `cwd` once so attach/status can fall
+    // back to it. None means "use the current directory".
+    let config_cwd: Option<String> = cfg
+        .agent
+        .options
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    match cmd {
+        ClaudeCmd::Sessions { cwd, limit } => {
+            let filter = cwd.as_deref().map(Path::new);
+            let sessions = claude_attach::list_sessions(filter)?;
+            if sessions.is_empty() {
+                println!(
+                    "No Claude sessions found under {}.",
+                    claude_attach::claude_home().join("projects").display()
+                );
+                return Ok(());
+            }
+            println!("uuid                                  age(min)   size  first user message");
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            for s in sessions.into_iter().take(limit) {
+                let age_min = now.saturating_sub(s.mtime) / 60;
+                let size_kb = s.size_bytes / 1024;
+                let preview: String = s.first_user_message.chars().take(60).collect();
+                println!(
+                    "{:<36}  {:>10}  {:>5}K  {}",
+                    s.uuid, age_min, size_kb, preview
+                );
+            }
+        }
+
+        ClaudeCmd::Attach { uuid, latest, cwd } => {
+            // `--latest` and a specific UUID are mutually exclusive.
+            if latest && uuid.is_some() {
+                return Err(anyhow!(
+                    "`--latest` and an explicit UUID can't both be set; pick one"
+                ));
+            }
+            // No-arg form prints the current attachment.
+            if !latest && uuid.is_none() {
+                return cmd_claude(cfg, ClaudeCmd::Status);
+            }
+
+            let state = if latest {
+                let cwd = cwd.or(config_cwd.clone()).unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_else(|_| ".".into())
+                });
+                claude_attach::AttachState {
+                    session_id: None,
+                    auto_resume: true,
+                    cwd: Some(cwd),
+                }
+            } else {
+                let raw = uuid.unwrap();
+                // Accept unambiguous prefix: scan all sessions, match.
+                let resolved = if raw.len() == 36 && raw.contains('-') {
+                    raw
+                } else {
+                    let candidates: Vec<_> = claude_attach::list_sessions(None)?
+                        .into_iter()
+                        .filter(|s| s.uuid.starts_with(&raw))
+                        .collect();
+                    match candidates.len() {
+                        0 => return Err(anyhow!("no session matches prefix {raw:?}")),
+                        1 => candidates.into_iter().next().unwrap().uuid,
+                        n => {
+                            return Err(anyhow!(
+                                "prefix {raw:?} is ambiguous ({n} matches); pass more chars"
+                            ));
+                        }
+                    }
+                };
+                claude_attach::AttachState {
+                    session_id: Some(resolved),
+                    auto_resume: false,
+                    cwd,
+                }
+            };
+            claude_attach::save_state(&state)?;
+            println!("✓ attached");
+            cmd_claude(cfg, ClaudeCmd::Status)?;
+        }
+
+        ClaudeCmd::Detach => {
+            claude_attach::clear_state()?;
+            println!("✓ detached — agent reverts to [agent] config defaults");
+        }
+
+        ClaudeCmd::Status => {
+            let auto_in_cfg = cfg
+                .agent
+                .options
+                .get("auto_resume")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let state = claude_attach::load_state()?;
+            let attachment =
+                claude_attach::resolve(state.as_ref(), config_cwd.as_deref(), auto_in_cfg);
+            match attachment {
+                claude_attach::Attachment::None => {
+                    println!("Stateless — each voice turn starts a fresh claude --print.");
+                }
+                claude_attach::Attachment::Pinned(uuid) => {
+                    println!("Pinned to session {uuid}");
+                }
+                claude_attach::Attachment::Latest { cwd } => {
+                    println!("Auto-resume in {}", cwd.display());
+                    match claude_attach::latest_session_for(&cwd) {
+                        Some(s) => println!("  → will resume {} (mtime={})", s.uuid, s.mtime),
+                        None => println!("  → no sessions found in that project yet"),
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }

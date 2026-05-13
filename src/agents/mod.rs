@@ -13,6 +13,7 @@ use crate::config::AgentConfig;
 use crate::session::Turn;
 
 mod claude;
+pub mod claude_attach;
 mod gemini;
 mod openai;
 mod shell;
@@ -64,6 +65,17 @@ pub(crate) fn opt_string(
         Some(toml::Value::String(s)) => Ok(Some(s.clone())),
         Some(other) => Err(anyhow!(
             "agent option {key:?} must be a string, got {}",
+            other.type_str()
+        )),
+    }
+}
+
+pub(crate) fn opt_bool(opts: &toml::Table, key: &str, default: bool) -> Result<bool> {
+    match opts.get(key) {
+        None => Ok(default),
+        Some(toml::Value::Boolean(b)) => Ok(*b),
+        Some(other) => Err(anyhow!(
+            "agent option {key:?} must be a boolean, got {}",
             other.type_str()
         )),
     }
