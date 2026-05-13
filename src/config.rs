@@ -172,7 +172,12 @@ impl Default for RecordConfig {
             sample_rate: 16_000,
             channels: 1,
             max_seconds: 15.0,
-            silence_seconds: 1.5,
+            // 2.5 s of sustained silence ends the turn — a deliberate
+            // bump from the original 1.5 because live testing showed
+            // users naturally pause longer than that mid-thought ("...
+            // pero además quisiera ver" → 2 s pause → "...si X"). The
+            // shorter value was clipping coherent multi-clause turns.
+            silence_seconds: 2.5,
             // -40 dBFS: live testing showed that even at -35 the user's
             // natural inter-word RMS dips (consonant articulation, brief
             // breaths) fell below threshold and the onset detector
