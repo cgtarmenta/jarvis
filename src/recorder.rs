@@ -8,15 +8,22 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, atomic::AtomicBool, atomic::Ordering};
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use tempfile::NamedTempFile;
 use tracing::{debug, info};
 
 use crate::config::RecordConfig;
 
-/// Backends we know how to invoke without user-supplied command lines.
-const KNOWN_BACKENDS: &[&str] = &["parecord", "pw-record", "arecord", "ffmpeg"];
+/// Backends we know how to invoke. Order is **deliberate** — `ffmpeg` is
+/// first because it's the only one with built-in silence-based auto-stop
+/// (`silenceremove`); without it the recorder runs to the full `max_seconds`
+/// and a voice turn always feels slow. arecord comes next because it honours
+/// `--max-file-time`; parecord/pw-record are last because they have no
+/// duration flag at all and rely on our timeout-kill fallback.
+const KNOWN_BACKENDS: &[&str] = &["ffmpeg", "arecord", "parecord", "pw-record"];
 
 fn detect() -> Result<&'static str> {
     for &name in KNOWN_BACKENDS {
@@ -25,8 +32,8 @@ fn detect() -> Result<&'static str> {
         }
     }
     Err(anyhow!(
-        "no supported recorder found in PATH. Install one of: alsa-utils \
-         (arecord), pipewire-pulse (parecord), pipewire (pw-record), or ffmpeg"
+        "no supported recorder found in PATH. Install one of: ffmpeg, \
+         alsa-utils (arecord), pipewire-pulse (parecord), pipewire (pw-record)"
     ))
 }
 
@@ -144,8 +151,21 @@ fn build_command(cfg: &RecordConfig, out: &Path) -> Result<Vec<String>> {
 /// The temp file is created with `delete = false` so it survives the
 /// `NamedTempFile` going out of scope; callers are expected to unlink it
 /// after they're done with the audio (the pipeline does this).
+///
+/// We spawn a watchdog thread that sends `SIGTERM` after `cfg.max_seconds`,
+/// because parecord/pw-record have no built-in duration limit and would
+/// otherwise record forever. The +0.5 s slack lets backends that *do*
+/// honour their own duration flag finish writing the WAV header cleanly
+/// before we step in.
 pub fn record_to_wav(cfg: &RecordConfig) -> Result<PathBuf> {
-    let tmp = NamedTempFile::with_prefix("jarvis-")?;
+    // The `.wav` suffix matters: ffmpeg infers the output muxer from the
+    // file extension. Without it, ffmpeg refuses to record with
+    // "Unable to choose an output format". arecord/parecord don't care but
+    // it costs nothing to give them a real extension too.
+    let tmp = tempfile::Builder::new()
+        .prefix("jarvis-")
+        .suffix(".wav")
+        .tempfile()?;
     let (_, out_path) = tmp.keep().context("persisting temp WAV")?;
 
     let argv = build_command(cfg, &out_path)?;
@@ -156,20 +176,57 @@ pub fn record_to_wav(cfg: &RecordConfig) -> Result<PathBuf> {
     );
     debug!("argv: {argv:?}");
 
-    let status = Command::new(&argv[0])
+    // Stderr is shown so the user sees ffmpeg / arecord status — handy when
+    // debugging "why isn't it hearing me?".
+    eprintln!(
+        "🎤 Recording (up to {:.0}s, Ctrl-C to stop)...",
+        cfg.max_seconds
+    );
+
+    let mut child = Command::new(&argv[0])
         .args(&argv[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
-        .status()
+        .spawn()
         .with_context(|| format!("spawning {}", argv[0]))?;
 
+    let pid = child.id();
+    let timeout = Duration::from_secs_f32(cfg.max_seconds + 0.5);
+    let finished = Arc::new(AtomicBool::new(false));
+    let finished_for_timer = Arc::clone(&finished);
+    let watchdog = thread::spawn(move || {
+        // Sleep then send SIGTERM if the process hasn't already exited.
+        let step = Duration::from_millis(100);
+        let mut waited = Duration::ZERO;
+        while waited < timeout {
+            if finished_for_timer.load(Ordering::Relaxed) {
+                return;
+            }
+            thread::sleep(step);
+            waited += step;
+        }
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+    });
+
+    let status = child.wait()?;
+    finished.store(true, Ordering::Relaxed);
+    let _ = watchdog.join();
+
+    // `success()` is false when we SIGTERM the child, but the WAV is still
+    // playable. Treat any non-zero exit as a soft failure: log it and let
+    // the STT step decide whether it could parse audio out of the result.
     if !status.success() {
-        return Err(anyhow!(
-            "recorder {:?} exited with status {status}",
-            argv[0]
-        ));
+        debug!(
+            recorder = %argv[0],
+            exit = ?status.code(),
+            "recorder exited non-zero (expected when timeout-killed)"
+        );
     }
+    eprintln!("🎤 Done.");
     Ok(out_path)
 }
 

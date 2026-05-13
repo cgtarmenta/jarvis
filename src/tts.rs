@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, anyhow};
-use tempfile::NamedTempFile;
 use tracing::{info, warn};
 
 use crate::config::{TtsConfig, data_dir};
@@ -89,6 +88,15 @@ impl Piper {
                 cfg.piper_binary
             ));
         }
+        if let Some(issue) = piper_binary_issue(&cfg.piper_binary) {
+            return Err(anyhow!(
+                "{} binary on PATH is not piper-tts: {issue}. \
+                 On Arch, the official `piper` package is a GTK app for gaming \
+                 mice — you want the AUR `piper-tts` instead (yay -S piper-tts), \
+                 which may require removing the gaming-mice piper first.",
+                cfg.piper_binary
+            ));
+        }
         let model = if let Some(path) = &cfg.piper_model_path {
             PathBuf::from(path)
         } else {
@@ -98,12 +106,33 @@ impl Piper {
     }
 }
 
+/// Return `Some(reason)` if `binary` exists on PATH but is *not* the TTS we
+/// want. Common false positive: the GTK gaming-mice app named `piper` ships
+/// in the official Arch repos and shadows the TTS one.
+///
+/// Returns `None` if the binary looks like piper-tts (or we can't tell — we
+/// only flag clear positives).
+pub fn piper_binary_issue(binary: &str) -> Option<String> {
+    let out = Command::new(binary).arg("--help").output().ok()?;
+    let help =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    // The GTK app's help shows GApplication/GTK-specific flag blocks. The
+    // TTS doesn't.
+    if help.contains("GApplication") || help.contains("--help-gtk") {
+        return Some("looks like the GTK \"piper\" gaming-mice app".into());
+    }
+    None
+}
+
 impl Tts for Piper {
     fn speak(&self, text: &str) -> Result<()> {
         if text.trim().is_empty() {
             return Ok(());
         }
-        let tmp = NamedTempFile::with_prefix("jarvis-tts-")?;
+        let tmp = tempfile::Builder::new()
+            .prefix("jarvis-tts-")
+            .suffix(".wav")
+            .tempfile()?;
         let (_, wav_path) = tmp.keep().context("persisting tts wav")?;
         let result = {
             let mut child = Command::new(&self.cfg.piper_binary)
