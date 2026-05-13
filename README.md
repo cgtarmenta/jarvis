@@ -206,9 +206,20 @@ echo "long summary text" | jarvis say -
 jarvis say --voice en_GB-alan-medium "tests passed"
 ```
 
-Hook it into [Claude Code's `Stop` event](https://docs.claude.com/en/docs/claude-code/hooks)
-to get a voice cue every time Claude finishes a turn — edit
-`~/.claude/settings.json`:
+> **First install Jarvis globally.** Hooks and scripts run from a fresh
+> shell that doesn't know about your `target/release/` checkout. From
+> the repo root:
+>
+> ```sh
+> cargo install --path . --force        # puts it in ~/.cargo/bin/jarvis
+> # or:
+> ./scripts/dev install-bin             # same thing, via the helper
+> ```
+
+### Hook into Claude Code
+
+Edit `~/.claude/settings.json` to fire `jarvis say` on every
+[`Stop` event](https://docs.claude.com/en/docs/claude-code/hooks):
 
 ```json
 {
@@ -217,7 +228,7 @@ to get a voice cue every time Claude finishes a turn — edit
       {
         "matcher": "",
         "hooks": [
-          { "type": "command", "command": "jarvis say \"Lista la tarea.\"" }
+          { "type": "command", "command": "jarvis say \"Listo, tarea completada.\"" }
         ]
       }
     ]
@@ -225,13 +236,19 @@ to get a voice cue every time Claude finishes a turn — edit
 }
 ```
 
-For a TTS summary instead of a fixed phrase, have the hook ask Claude
-for a one-liner and pipe it through:
+For a dynamic one-sentence summary instead of a fixed phrase, parse
+the hook's JSON-on-stdin (Claude Code passes `session_id` there, not
+as an env var) and pipe the answer through. Requires `jq`:
 
 ```json
-{ "type": "command",
-  "command": "claude --print --resume \"$CLAUDE_SESSION_ID\" 'In one sentence, what did you just finish?' | jarvis say -" }
+{
+  "type": "command",
+  "command": "jq -r '.session_id' | xargs -I{} claude --print --resume {} 'In one short sentence, what did you just finish?' | jarvis say -"
+}
 ```
+
+If you don't want a `jq` dependency, a fixed phrase is a perfectly
+fine first step.
 
 ## Specs
 

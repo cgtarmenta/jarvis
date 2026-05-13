@@ -82,6 +82,22 @@ cmd_clean() {
     cargo clean
 }
 
+# Install the release binary into ~/.cargo/bin so `jarvis` is on PATH
+# for scripts and Claude Code hooks that run from a fresh shell.
+cmd_install_bin() {
+    ensure_toolchain
+    say "Installing jarvis into ~/.cargo/bin (cargo install --path .)"
+    cargo install --path "${PROJECT_ROOT}" --force
+    say "Verifying:"
+    if command -v jarvis >/dev/null 2>&1; then
+        printf "  jarvis is at: %s\n" "$(command -v jarvis)"
+        jarvis --version
+    else
+        warn "jarvis still not on PATH. Add this to your shell profile:"
+        warn "  export PATH=\"\$HOME/.cargo/bin:\$PATH\""
+    fi
+}
+
 cmd_help() {
     cat <<EOF
 ${c_bold}Jarvis dev runner (Rust)${c_reset}
@@ -89,14 +105,16 @@ ${c_bold}Jarvis dev runner (Rust)${c_reset}
 Usage: ./scripts/dev <command> [args]
 
 Commands:
-  install    Check toolchain, fetch deps, debug build
-  run [...]  cargo run -- <args>  (forwards args to jarvis)
-  doctor     cargo build --release && jarvis doctor
-  test       cargo fmt --check + clippy + cargo test
-  lint       cargo fmt + clippy --fix
-  build      cargo build --release; print binary size
-  clean      cargo clean
-  help       Show this message
+  install      Check toolchain, fetch deps, debug build
+  install-bin  Install the release binary to ~/.cargo/bin/jarvis
+               (so \`jarvis say\` works inside Claude Code hooks etc.)
+  run [...]    cargo run -- <args>  (forwards args to jarvis)
+  doctor       cargo build --release && jarvis doctor
+  test         cargo fmt --check + clippy + cargo test
+  lint         cargo fmt + clippy --fix
+  build        cargo build --release; print binary size
+  clean        cargo clean
+  help         Show this message
 
 Quick start:
 
@@ -110,8 +128,9 @@ main() {
     local cmd="${1:-help}"
     shift || true
     case "${cmd}" in
-        install) cmd_install "$@" ;;
-        run)     cmd_run "$@" ;;
+        install)     cmd_install "$@" ;;
+        install-bin) cmd_install_bin "$@" ;;
+        run)         cmd_run "$@" ;;
         doctor)  cmd_doctor "$@" ;;
         test)    cmd_test "$@" ;;
         lint)    cmd_lint "$@" ;;
