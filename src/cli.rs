@@ -112,12 +112,18 @@ enum Cmd {
         cmd: SpecCmd,
     },
 
-    /// Attach Jarvis's `claude` agent to a Claude Code session so each
-    /// voice turn continues a real CLI conversation (full tool-call and
-    /// file-edit context preserved via `claude --print --resume <id>`).
-    Claude {
+    /// Manage external-agent sessions. Dispatches based on
+    /// `[agent].name` in config:
+    ///
+    /// * `claude` / `claude-code` — Claude Code session attach via
+    ///   `claude --print --resume <uuid>`. All four verbs supported.
+    /// * `warp` / `oz` — roadmap (no-op for now).
+    /// * `openai` / `gemini` / `shell` — agents are stateless from
+    ///   Jarvis's POV; use `jarvis session` to inspect Jarvis's
+    ///   conversation history instead.
+    Agent {
         #[command(subcommand)]
-        cmd: ClaudeCmd,
+        cmd: AgentCmd,
     },
 
     /// Diagnostic: run the configured wake backend for N seconds with
@@ -150,8 +156,9 @@ enum SessionCmd {
 }
 
 #[derive(Subcommand, Debug)]
-enum ClaudeCmd {
-    /// List every Claude Code session under `~/.claude/projects/`,
+enum AgentCmd {
+    /// List every external agent session available for resumption.
+    /// For the claude agent: every JSONL under `~/.claude/projects/`,
     /// newest first. With `--cwd`, restrict to one project.
     Sessions {
         /// Filter to the project at this working dir (encoded the same
@@ -162,8 +169,9 @@ enum ClaudeCmd {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
-    /// Pin Jarvis to a specific session UUID. Subsequent voice turns
-    /// pass `--resume <uuid>` to `claude --print`.
+    /// Pin Jarvis to a specific external-agent session UUID.
+    /// Subsequent voice turns resume that session via the agent's
+    /// native mechanism (e.g. `claude --print --resume <uuid>`).
     ///
     /// Without arguments, prints the currently pinned attachment.
     /// With `--latest`, instead saves auto-resume mode targeting the
@@ -182,7 +190,7 @@ enum ClaudeCmd {
         #[arg(long)]
         cwd: Option<String>,
     },
-    /// Forget the pinned attachment. The claude agent reverts to
+    /// Forget the pinned attachment. The configured agent reverts to
     /// whatever `[agent]` config says (`auto_resume = true` keeps
     /// auto-mode; otherwise the agent goes stateless).
     Detach,
@@ -251,7 +259,7 @@ pub fn run() -> Result<()> {
         Cmd::TestAgent { prompt } => cmd_test_agent(&cfg, &prompt.join(" ")),
         Cmd::Session { cmd } => cmd_session(cmd),
         Cmd::Spec { cmd } => cmd_spec(cmd),
-        Cmd::Claude { cmd } => cmd_claude(&cfg, cmd),
+        Cmd::Agent { cmd } => cmd_agent(&cfg, cmd),
         Cmd::TestWake {
             seconds,
             threshold,
@@ -436,7 +444,7 @@ fn cmd_doctor(cfg: &JarvisConfig, cfg_path: &Path) -> Result<()> {
                 }
             };
             line(
-                "claude attach",
+                "agent attach",
                 !matches!(attachment, claude_attach::Attachment::None),
                 &detail,
             );
@@ -829,7 +837,60 @@ fn print_spec_detail(s: &crate::specs::spec::Spec) {
     println!("{}", s.serialize());
 }
 
-fn cmd_claude(cfg: &JarvisConfig, cmd: ClaudeCmd) -> Result<()> {
+/// Per-agent dispatcher for `jarvis agent <verb>`. Inspects
+/// `cfg.agent.name` and routes to the right backend's handler, or
+/// emits a polite explanation when the configured agent has no
+/// external session concept.
+fn cmd_agent(cfg: &JarvisConfig, cmd: AgentCmd) -> Result<()> {
+    match cfg.agent.name.as_str() {
+        "claude" | "claude-code" => cmd_agent_claude(cfg, cmd),
+        "warp" | "oz" => {
+            agent_unsupported(
+                &cfg.agent.name,
+                "warp session attach is on the roadmap but not yet implemented \
+                 (see specs/inbox for status).",
+            );
+            Ok(())
+        }
+        "openai" | "chatgpt" | "gemini" | "google" => {
+            agent_unsupported(
+                &cfg.agent.name,
+                "this agent is stateless from Jarvis's POV — there's no \
+                 external session to attach to. Use `jarvis session` to \
+                 inspect / reset the Jarvis-side conversation history.",
+            );
+            Ok(())
+        }
+        "shell" => {
+            agent_unsupported(
+                "shell",
+                "the shell agent's session model depends on the command \
+                 you wired up. Manage Jarvis-side history with \
+                 `jarvis session` instead.",
+            );
+            Ok(())
+        }
+        other => {
+            agent_unsupported(
+                other,
+                "unknown agent name — check `[agent].name` in your config.",
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Friendly informational printout for verbs that don't apply to the
+/// configured agent. Exit code stays 0 — this is documentation, not
+/// failure.
+fn agent_unsupported(agent_name: &str, message: &str) {
+    println!("agent {agent_name:?}: {message}");
+}
+
+/// Claude-specific dispatcher. Kept distinct from `cmd_agent` so the
+/// per-agent logic stays in its own block and is easy to extend when
+/// other agents grow session support.
+fn cmd_agent_claude(cfg: &JarvisConfig, cmd: AgentCmd) -> Result<()> {
     use crate::agents::claude_attach;
     use std::path::Path;
 
@@ -843,7 +904,7 @@ fn cmd_claude(cfg: &JarvisConfig, cmd: ClaudeCmd) -> Result<()> {
         .map(str::to_string);
 
     match cmd {
-        ClaudeCmd::Sessions { cwd, limit } => {
+        AgentCmd::Sessions { cwd, limit } => {
             let filter = cwd.as_deref().map(Path::new);
             let sessions = claude_attach::list_sessions(filter)?;
             if sessions.is_empty() {
@@ -869,7 +930,7 @@ fn cmd_claude(cfg: &JarvisConfig, cmd: ClaudeCmd) -> Result<()> {
             }
         }
 
-        ClaudeCmd::Attach { uuid, latest, cwd } => {
+        AgentCmd::Attach { uuid, latest, cwd } => {
             // `--latest` and a specific UUID are mutually exclusive.
             if latest && uuid.is_some() {
                 return Err(anyhow!(
@@ -878,7 +939,7 @@ fn cmd_claude(cfg: &JarvisConfig, cmd: ClaudeCmd) -> Result<()> {
             }
             // No-arg form prints the current attachment.
             if !latest && uuid.is_none() {
-                return cmd_claude(cfg, ClaudeCmd::Status);
+                return cmd_agent_claude(cfg, AgentCmd::Status);
             }
 
             let state = if latest {
@@ -920,15 +981,15 @@ fn cmd_claude(cfg: &JarvisConfig, cmd: ClaudeCmd) -> Result<()> {
             };
             claude_attach::save_state(&state)?;
             println!("✓ attached");
-            cmd_claude(cfg, ClaudeCmd::Status)?;
+            cmd_agent_claude(cfg, AgentCmd::Status)?;
         }
 
-        ClaudeCmd::Detach => {
+        AgentCmd::Detach => {
             claude_attach::clear_state()?;
             println!("✓ detached — agent reverts to [agent] config defaults");
         }
 
-        ClaudeCmd::Status => {
+        AgentCmd::Status => {
             let auto_in_cfg = cfg
                 .agent
                 .options

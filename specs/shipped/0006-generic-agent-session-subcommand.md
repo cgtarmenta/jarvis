@@ -1,10 +1,10 @@
 ---
 id: 0006
 title: Generic agent session subcommand
-status: active
+status: shipped
 owner: tadeo
 created: 2026-05-13
-shipped:
+shipped: 2026-05-13
 verifying:
   - cargo run -- agent --help
   - cargo run -- agent status   # under each agent type
@@ -54,29 +54,29 @@ at `jarvis session` (the Jarvis-side conversation history).
 
 ## What
 
-- [ ] `jarvis claude` is removed as a CLI subcommand. The functionality
+- [x] `jarvis claude` is removed as a CLI subcommand. The functionality
       moves under `jarvis agent`.
-- [ ] `jarvis agent sessions [--cwd PATH] [--limit N]` works when
+- [x] `jarvis agent sessions [--cwd PATH] [--limit N]` works when
       `[agent].name = "claude" | "claude-code"` and behaves
       identically to the old `jarvis claude sessions`.
-- [ ] `jarvis agent attach <uuid|--latest [--cwd PATH]>` behaves
+- [x] `jarvis agent attach <uuid|--latest [--cwd PATH]>` behaves
       identically to the old `jarvis claude attach`.
-- [ ] `jarvis agent detach` and `jarvis agent status` behave
+- [x] `jarvis agent detach` and `jarvis agent status` behave
       identically to the old equivalents.
-- [ ] When the configured agent has no external session concept
+- [x] When the configured agent has no external session concept
       (openai, gemini, shell), `jarvis agent <verb>` prints a clear
       message naming the agent and pointing at `jarvis session` for
       Jarvis-side conversation history. Exit code 0 — informational,
       not an error.
-- [ ] When the configured agent is `warp` / `oz`, `jarvis agent`
+- [x] When the configured agent is `warp` / `oz`, `jarvis agent`
       verbs print "not yet implemented for warp" with a pointer to
       the roadmap. Exit code 0.
-- [ ] `jarvis doctor` line previously labelled `claude attach`
+- [x] `jarvis doctor` line previously labelled `claude attach`
       becomes `agent attach`, still only populated for the claude
       agent (other agents are stateless or roadmap).
-- [ ] README's "Notify on long-running tasks" + any other mentions of
+- [x] README's "Notify on long-running tasks" + any other mentions of
       `jarvis claude` are updated.
-- [ ] CHANGELOG entry under `## [Unreleased]` documenting the rename.
+- [x] CHANGELOG entry under `## [Unreleased]` documenting the rename.
 
 ## How
 
@@ -112,6 +112,8 @@ Spec 0005 stays in `specs/shipped/` unmodified — that's our
 immutability rule. This spec references it from `related:`.
 
 ## Journal
+
+- 2026-05-13: shipped.
 
 - 2026-05-13: promoted to active.
 

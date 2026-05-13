@@ -13,8 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Claude Code session via `claude --print --resume <uuid>`, preserving
   tool calls and file-edit context. New `[agent].auto_resume` config
   flag, new state file `~/.cache/jarvis/claude-attach.toml` for pinned
-  attachments, and new `jarvis claude {sessions,attach,detach,status}`
-  subcommands. `jarvis doctor` reports the active attachment.
+  attachments, and new `jarvis agent {sessions,attach,detach,status}`
+  subcommands that dispatch per-agent (claude implemented; warp roadmap;
+  stateless agents get a polite informational message). `jarvis doctor`
+  reports the active attachment.
 - `jarvis say <text>` subcommand exposes the TTS pipeline as a generic
   voice-notification target. Reads stdin when invoked as `jarvis say -`
   or with no args, accepts `--voice` to try a voice without editing
