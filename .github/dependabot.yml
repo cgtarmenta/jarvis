@@ -1,17 +1,18 @@
 version: 2
 updates:
-  - package-ecosystem: pip
+  - package-ecosystem: cargo
     directory: "/"
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
-    labels: ["dependencies", "python"]
+    labels: ["dependencies", "rust"]
     groups:
-      runtime:
+      # Group all minor/patch updates into one PR per week so the inbox
+      # doesn't drown. Major updates still come as individual PRs so they
+      # get proper review.
+      cargo-minor:
         patterns: ["*"]
-        exclude-patterns: ["pytest*", "ruff*", "mypy*", "pre-commit*", "build"]
-      dev:
-        patterns: ["pytest*", "ruff*", "mypy*", "pre-commit*", "build"]
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: github-actions
     directory: "/"
