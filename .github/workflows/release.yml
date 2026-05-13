@@ -62,7 +62,7 @@ jobs:
             os: macos-latest
             archive: jarvis-${{ needs.classify.outputs.version }}-aarch64-macos.tar.gz
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ needs.classify.outputs.tag }}
 
