@@ -241,18 +241,22 @@ until the audio finishes:
 
 For a dynamic one-sentence summary instead of a fixed phrase, parse
 the hook's JSON-on-stdin (Claude Code passes `session_id` there, not
-as an env var) and pipe the answer through. Requires `jq`. The
-`--detach` matters here too:
+as an env var) and pipe the answer through. Requires `jq`. **You
+must pass `--bare` to the inner `claude` invocation** — otherwise
+*it* fires the Stop hook when it finishes, which calls `claude`
+again, which fires the hook again, and so on until you `kill -9`
+something. `--bare` tells Claude Code to skip hooks. `--detach` is
+still needed on `jarvis say` so the audio playback doesn't block:
 
 ```json
 {
   "type": "command",
-  "command": "jq -r '.session_id' | xargs -I{} claude --print --resume {} 'In one short sentence, what did you just finish?' | jarvis say --detach -"
+  "command": "jq -r '.session_id' | xargs -I{} claude --bare --print --resume {} 'In one short sentence, what did you just finish?' | jarvis say --detach -"
 }
 ```
 
 If you don't want a `jq` dependency, a fixed phrase is a perfectly
-fine first step.
+fine first step — and it has no recursion risk to worry about.
 
 ## Specs
 
