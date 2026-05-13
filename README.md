@@ -193,6 +193,15 @@ there.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the contributor workflow and
 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community norms.
 
+## Specs
+
+We use lightweight spec-driven development: each non-trivial change
+gets a short markdown spec in [`specs/`](specs/) capturing intent
+before implementation. Browse `specs/shipped/` to see how the project
+got here, `specs/active/` for what's being built right now, and
+`specs/inbox/` for rough ideas. The format and lifecycle are
+documented in [`specs/README.md`](specs/README.md).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

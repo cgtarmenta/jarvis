@@ -14,3 +14,8 @@ packaging/*.pkg.tar*
 .idea/
 *.swp
 .DS_Store
+
+# Spec-driven development — `specs/private/` is the per-developer scratch
+# space for half-baked / experimental specs. Anything you want to share
+# goes in `specs/inbox/` (still informal, but visible in PRs).
+specs/private/

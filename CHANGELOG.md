@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Conversation sessions: persistent JSON-backed history at
+  `~/.cache/jarvis/sessions/current.json` so the agent keeps context
+  across wake events. New `[session]` config block, `jarvis session
+  {show,reset,path}` subcommand, and voice reset phrases ("olvida",
+  "new conversation", …).
+- Spec-driven development scaffolding under [`specs/`](specs/) with
+  `inbox/`, `active/`, `shipped/`, `rejected/` directories, a
+  canonical README + template, and three seed specs retro-documenting
+  shipped features.
+
+### Added
+
 - Warp `oz` agent (`name = "warp"`): wraps `oz agent run --prompt …`, with
   optional `model`, `profile`, `cwd`, and `api_key` overrides. Auto-detects
   the binary among `oz`, `oz-preview`, and the deprecated `warp-cli`.
