@@ -173,12 +173,14 @@ impl Default for RecordConfig {
             channels: 1,
             max_seconds: 15.0,
             silence_seconds: 1.5,
-            // -35 dBFS: looser than the original -30 because live testing
-            // on a normal USB-mic-plus-laptop-fan setup showed speech RMS
-            // landing around -32 dBFS, which a -30 dBFS threshold
-            // misclassified as silence. Idle on the same rig sits at
-            // -40 to -50 dBFS, so -35 still cleanly separates the two.
-            silence_threshold_db: -35.0,
+            // -40 dBFS: live testing showed that even at -35 the user's
+            // natural inter-word RMS dips (consonant articulation, brief
+            // breaths) fell below threshold and the onset detector
+            // truncated utterances after silence_seconds. Idle on the
+            // same rig measured -44 to -52 dBFS, so -40 still separates
+            // speech (avg -25 to -33) from idle, with margin for the
+            // articulation dips that motivated the change.
+            silence_threshold_db: -40.0,
             command: Vec::new(),
         }
     }

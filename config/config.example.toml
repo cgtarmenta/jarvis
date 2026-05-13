@@ -68,12 +68,13 @@ sample_rate     = 16000
 channels        = 1
 max_seconds     = 15.0
 silence_seconds = 1.5
-silence_threshold_db = -35.0   # dBFS below which audio counts as silence.
+silence_threshold_db = -40.0   # dBFS below which audio counts as silence.
                                 # Default tuned for normal USB headset / laptop
-                                # mic (speech ~-25 to -33 dBFS, idle ~-40 to
-                                # -50 dBFS). Loosen toward -30 if your mic
-                                # picks up natural pauses as voice; tighten
-                                # toward -40 only in a sound-treated room.
+                                # mic (speech ~-25 to -33 dBFS, idle ~-44 to
+                                # -52 dBFS, with inter-word articulation dips
+                                # that need to stay above threshold). Tighten
+                                # toward -30 if your mic picks up natural
+                                # pauses as voice.
 # command         = ["arecord", "-r", "16000", "-f", "S16_LE", "{out}"]
 
 # ----------------------------------------------------------------------------
