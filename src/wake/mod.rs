@@ -9,7 +9,7 @@
 
 use anyhow::{Result, anyhow};
 
-use crate::config::WakeConfig;
+use crate::config::{SttConfig, WakeConfig};
 
 mod none;
 mod whisper;
@@ -29,11 +29,16 @@ pub trait WakeBackend {
 }
 
 /// Build the configured backend.
-pub fn build(cfg: WakeConfig) -> Result<Box<dyn WakeBackend + Send + Sync>> {
+///
+/// `stt` is the project-wide STT config, threaded through so the `whisper`
+/// wake backend reuses the user's model and binary paths instead of falling
+/// back to compile-time defaults (which point at a system path most users
+/// don't have).
+pub fn build(cfg: WakeConfig, stt: SttConfig) -> Result<Box<dyn WakeBackend + Send + Sync>> {
     let backend = cfg.backend.to_lowercase();
     match backend.as_str() {
         "none" | "off" | "disabled" | "" => Ok(Box::new(NoopWake)),
-        "whisper" | "whisper-cli" => Ok(Box::new(WhisperWake::new(cfg)?)),
+        "whisper" | "whisper-cli" => Ok(Box::new(WhisperWake::new(cfg, stt)?)),
 
         // Roadmap backends — wired into the factory so the wizard can show
         // them and the user gets a clear error instead of silent failure
@@ -79,7 +84,7 @@ mod tests {
             backend: "fnord".into(),
             ..WakeConfig::default()
         };
-        assert!(build(cfg).is_err());
+        assert!(build(cfg, SttConfig::default()).is_err());
     }
 
     #[test]

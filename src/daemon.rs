@@ -30,7 +30,7 @@ pub fn run(cfg: JarvisConfig) -> Result<()> {
         return Ok(());
     }
 
-    let backend = wake::build(cfg.wake.clone())?;
+    let backend = wake::build(cfg.wake.clone(), cfg.stt.clone())?;
     info!(
         backend = backend.name(),
         phrases = ?cfg.wake.phrases,

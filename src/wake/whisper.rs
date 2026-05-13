@@ -43,17 +43,17 @@ pub struct WhisperWake {
 }
 
 impl WhisperWake {
-    pub fn new(cfg: WakeConfig) -> Result<Self> {
+    pub fn new(cfg: WakeConfig, stt_cfg: SttConfig) -> Result<Self> {
         if cfg.phrases.is_empty() {
             return Err(anyhow!(
                 "wake backend = \"whisper\" requires [wake].phrases to be non-empty (e.g. phrases = [\"jarvis\", \"mutombo\"])"
             ));
         }
 
-        // The wake-word path reuses whisper.cpp but with a copy of the STT
-        // config — we don't share state, only the binary + model. The user
-        // can later add `[wake].stt_model` for a smaller faster model.
-        let stt_cfg = SttConfig::default(); // overridden by load_config in practice
+        // Use the user's STT config (model path, binary, threads, GPU
+        // flags) for the wake transcription. A future iteration may add a
+        // `[wake].stt_model` override so users can run a tiny model in the
+        // always-on loop and keep large-v3 for the main listen flow.
         let stt = WhisperCli::new(stt_cfg);
 
         let phrases_normalised = cfg
