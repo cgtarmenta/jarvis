@@ -61,21 +61,20 @@ pub fn run(cfg: JarvisConfig) -> Result<()> {
 }
 
 /// Loop on follow-up turns until the user goes silent (`run_turn` returns
-/// `Ok(None)`), an error occurs, or shutdown is requested. The follow-up
-/// recorder uses `session.followup_window_secs` as its `max_seconds`, and
-/// skips the audible cue — both indicators that we are continuing a
-/// conversation rather than starting one.
+/// `Ok(None)`), an error occurs, or shutdown is requested.
+///
+/// Each follow-up turn uses an onset-gated recorder: we wait up to
+/// `session.followup_window_secs` for the user to start speaking, and if
+/// they do, we capture the *entire* utterance bounded by the normal
+/// `record.max_seconds` — not by the follow-up window. The v1 of this
+/// loop conflated the two timeouts and cut users off mid-sentence; see
+/// the spec journal for the post-mortem.
 fn run_followup_chain(cfg: &JarvisConfig, stop: &Arc<AtomicBool>) {
     let window = cfg.session.followup_window_secs;
     if window <= 0.0 {
         return;
     }
-    let mut record_cfg = cfg.record.clone();
-    record_cfg.max_seconds = window;
-    let opts = TurnOptions {
-        record_override: Some(record_cfg),
-        play_cue: false,
-    };
+    let opts = TurnOptions::followup(window);
     loop {
         if stop.load(Ordering::Relaxed) {
             return;

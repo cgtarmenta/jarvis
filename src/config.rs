@@ -151,6 +151,15 @@ pub struct RecordConfig {
     pub channels: u32,
     pub max_seconds: f32,
     pub silence_seconds: f32,
+    /// dBFS threshold below which audio is considered "silence" for the
+    /// ffmpeg `silenceremove` filter. Larger (less negative) values are
+    /// more permissive — they treat quiet-but-not-silent audio as silence
+    /// and let the recorder terminate sooner on natural pauses. Default
+    /// `-30.0` works on typical USB headsets and laptop mics; tighten to
+    /// `-40.0` in a sound-treated room or loosen toward `-20.0` if your
+    /// utterances get cut off mid-sentence because ambient noise prevents
+    /// the silence detector from ever firing.
+    pub silence_threshold_db: f32,
     /// Used only when `backend = "command"`. `{out}` is replaced with the WAV path.
     pub command: Vec<String>,
 }
@@ -164,6 +173,7 @@ impl Default for RecordConfig {
             channels: 1,
             max_seconds: 15.0,
             silence_seconds: 1.5,
+            silence_threshold_db: -30.0,
             command: Vec::new(),
         }
     }

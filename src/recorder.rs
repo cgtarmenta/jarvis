@@ -114,8 +114,8 @@ fn build_ffmpeg(cfg: &RecordConfig, out: &Path) -> Vec<String> {
         // filter graph reports EOF and ffmpeg exits.
         "-af".into(),
         format!(
-            "silenceremove=stop_periods=1:stop_duration={}:stop_threshold=-40dB",
-            cfg.silence_seconds
+            "silenceremove=stop_periods=1:stop_duration={}:stop_threshold={}dB",
+            cfg.silence_seconds, cfg.silence_threshold_db
         ),
         "-t".into(),
         cfg.max_seconds.to_string(),
@@ -236,6 +236,276 @@ pub fn record_to_wav(cfg: &RecordConfig) -> Result<PathBuf> {
     Ok(out_path)
 }
 
+/// Capture an utterance gated by a speech-onset window.
+///
+/// Unlike [`record_to_wav`], which gives the caller a single
+/// hard-deadline recording, this opens the mic and:
+///
+/// 1. Waits up to `onset_window_secs` for the user to start speaking
+///    (RMS sustained above `cfg.silence_threshold_db` for ~200 ms).
+/// 2. Once speech starts, keeps recording until either trailing
+///    silence of `cfg.silence_seconds` is detected or the utterance
+///    hits `cfg.max_seconds` from onset.
+///
+/// Returns `Ok(None)` if the onset window elapses without speech (the
+/// daemon's follow-up loop uses this to end the chain). Returns
+/// `Ok(Some(path))` with a freshly-written WAV otherwise. The caller
+/// owns the file and is expected to unlink it.
+///
+/// The audible-cue + 250 ms settle that `pipeline::run_turn` performs
+/// for primary turns is intentionally skipped here — onset detection
+/// is the cue. The leading buffer (samples observed *before* we are
+/// sure it's speech) is preserved in the output so we don't clip
+/// the first syllable, which is the exact bug that motivated this
+/// function over a naive two-phase "detect then record" split.
+pub fn record_with_onset(cfg: &RecordConfig, onset_window_secs: f32) -> Result<Option<PathBuf>> {
+    // Same temp-file dance as record_to_wav.
+    let tmp = tempfile::Builder::new()
+        .prefix("jarvis-fu-")
+        .suffix(".wav")
+        .tempfile()?;
+    let (_, out_path) = tmp.keep().context("persisting temp WAV")?;
+
+    let mut child = spawn_raw_pcm_recorder()?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("recorder stdout unavailable"))?;
+
+    // 100 ms chunks at 16 kHz mono = 1600 samples = 3200 bytes. Matches
+    // the wake backend's framing so the RMS/dB math behaves the same.
+    const SAMPLE_RATE: u32 = 16_000;
+    const CHUNK_MS: f32 = 100.0;
+    const CHUNK_SAMPLES: usize = (SAMPLE_RATE as f32 * CHUNK_MS / 1000.0) as usize;
+    const CHUNK_BYTES: usize = CHUNK_SAMPLES * 2;
+    let chunks_per_sec = 1000.0 / CHUNK_MS;
+    let onset_sustain_chunks = 2usize; // 200 ms — short enough to feel snappy
+
+    let silence_threshold = cfg.silence_threshold_db;
+    let silence_chunks_needed = ((cfg.silence_seconds * chunks_per_sec).ceil() as usize).max(1);
+    let max_capture_chunks = ((cfg.max_seconds * chunks_per_sec).ceil() as usize).max(1);
+    let max_onset_chunks = ((onset_window_secs * chunks_per_sec).ceil() as usize).max(1);
+
+    enum State {
+        SeekingOnset { voice_run: usize },
+        Capturing { silence_run: usize, captured: usize },
+    }
+    let mut state = State::SeekingOnset { voice_run: 0 };
+    let mut samples: Vec<i16> = Vec::with_capacity(CHUNK_SAMPLES * (max_capture_chunks + 4));
+    let mut buf = vec![0u8; CHUNK_BYTES];
+    let mut elapsed_chunks = 0usize;
+
+    let outcome: Result<Option<PathBuf>> = (|| loop {
+        if !read_exact_or_eof(&mut stdout, &mut buf)? {
+            // Recorder died (mic unplugged, ffmpeg crash). Treat as
+            // "no speech" rather than failing the turn — the daemon
+            // will return to wake gating and the next attempt will
+            // surface the underlying error if it's persistent.
+            return Ok(None);
+        }
+        elapsed_chunks += 1;
+        let rms = compute_rms_normalised(&buf);
+        let dbfs = rms_to_dbfs(rms);
+        let voiced = dbfs >= silence_threshold;
+
+        match state {
+            State::SeekingOnset { mut voice_run } => {
+                if voiced {
+                    voice_run += 1;
+                    // Keep the audio of *every* voiced chunk so the leading
+                    // edge of the utterance survives onset confirmation.
+                    samples.extend(decode_chunk_to_i16(&buf));
+                    if voice_run >= onset_sustain_chunks {
+                        state = State::Capturing {
+                            silence_run: 0,
+                            captured: voice_run,
+                        };
+                    } else {
+                        state = State::SeekingOnset { voice_run };
+                    }
+                } else {
+                    // False start — discard any preliminary voiced
+                    // samples we'd buffered, reset the counter.
+                    samples.clear();
+                    state = State::SeekingOnset { voice_run: 0 };
+                    if elapsed_chunks >= max_onset_chunks {
+                        return Ok(None);
+                    }
+                }
+            }
+            State::Capturing {
+                mut silence_run,
+                mut captured,
+            } => {
+                samples.extend(decode_chunk_to_i16(&buf));
+                captured += 1;
+                if voiced {
+                    silence_run = 0;
+                } else {
+                    silence_run += 1;
+                    if silence_run >= silence_chunks_needed {
+                        return Ok(Some(out_path.clone()));
+                    }
+                }
+                if captured >= max_capture_chunks {
+                    return Ok(Some(out_path.clone()));
+                }
+                state = State::Capturing {
+                    silence_run,
+                    captured,
+                };
+            }
+        }
+    })();
+
+    // SIGTERM the recorder either way: we have the data we need.
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGTERM);
+    }
+    let _ = child.wait();
+
+    match outcome {
+        Ok(Some(path)) => {
+            write_pcm_wav(&path, SAMPLE_RATE, &samples)?;
+            Ok(Some(path))
+        }
+        Ok(None) => {
+            // Onset window expired; clean up the empty temp file.
+            let _ = std::fs::remove_file(&out_path);
+            Ok(None)
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&out_path);
+            Err(e)
+        }
+    }
+}
+
+/// Spawn a recorder writing raw 16-bit mono PCM at 16 kHz to stdout. The
+/// caller is expected to SIGTERM the child when finished. We prefer
+/// ffmpeg (clean raw output) then parecord / arecord. Mirrors the wake
+/// backend's setup so behaviour is consistent across the codebase.
+fn spawn_raw_pcm_recorder() -> Result<std::process::Child> {
+    if which::which("ffmpeg").is_ok() {
+        return Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "pulse",
+                "-i",
+                "default",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-f",
+                "s16le",
+                "-",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("spawning ffmpeg for onset-gated recording");
+    }
+    if which::which("parecord").is_ok() {
+        return Command::new("parecord")
+            .args(["--raw", "--format=s16le", "--rate=16000", "--channels=1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("spawning parecord for onset-gated recording");
+    }
+    if which::which("arecord").is_ok() {
+        return Command::new("arecord")
+            .args(["-q", "-t", "raw", "-f", "S16_LE", "-r", "16000", "-c", "1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("spawning arecord for onset-gated recording");
+    }
+    Err(anyhow!(
+        "no continuous-capable recorder found on PATH \
+         (need one of: ffmpeg, parecord, arecord)"
+    ))
+}
+
+fn read_exact_or_eof<R: std::io::Read>(r: &mut R, buf: &mut [u8]) -> Result<bool> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match r.read(&mut buf[filled..])? {
+            0 => return Ok(false),
+            n => filled += n,
+        }
+    }
+    Ok(true)
+}
+
+fn compute_rms_normalised(bytes: &[u8]) -> f32 {
+    if bytes.is_empty() {
+        return 0.0;
+    }
+    let mut sum_sq = 0.0f64;
+    let mut count = 0usize;
+    for pair in bytes.chunks_exact(2) {
+        let sample = i16::from_le_bytes([pair[0], pair[1]]) as f64;
+        sum_sq += sample * sample;
+        count += 1;
+    }
+    if count == 0 {
+        return 0.0;
+    }
+    let mean = sum_sq / count as f64;
+    (mean.sqrt() / i16::MAX as f64) as f32
+}
+
+/// Convert a normalised RMS (0.0 = silence, 1.0 = full scale) to dBFS.
+/// `silence_threshold_db` is expressed in dBFS so the call site
+/// compares apples to apples. Returns `f32::NEG_INFINITY` for the
+/// silent-buffer case so it's always strictly below any real threshold.
+fn rms_to_dbfs(rms: f32) -> f32 {
+    if rms <= 0.0 {
+        return f32::NEG_INFINITY;
+    }
+    20.0 * rms.log10()
+}
+
+fn decode_chunk_to_i16(bytes: &[u8]) -> Vec<i16> {
+    bytes
+        .chunks_exact(2)
+        .map(|p| i16::from_le_bytes([p[0], p[1]]))
+        .collect()
+}
+
+fn write_pcm_wav(path: &Path, sample_rate: u32, samples: &[i16]) -> Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    let data_size = (samples.len() * 2) as u32;
+    let chunk_size = 36 + data_size;
+    let byte_rate = sample_rate * 2; // 1 channel * 2 bytes/sample
+    f.write_all(b"RIFF")?;
+    f.write_all(&chunk_size.to_le_bytes())?;
+    f.write_all(b"WAVEfmt ")?;
+    f.write_all(&16u32.to_le_bytes())?;
+    f.write_all(&1u16.to_le_bytes())?;
+    f.write_all(&1u16.to_le_bytes())?;
+    f.write_all(&sample_rate.to_le_bytes())?;
+    f.write_all(&byte_rate.to_le_bytes())?;
+    f.write_all(&2u16.to_le_bytes())?;
+    f.write_all(&16u16.to_le_bytes())?;
+    f.write_all(b"data")?;
+    f.write_all(&data_size.to_le_bytes())?;
+    for s in samples {
+        f.write_all(&s.to_le_bytes())?;
+    }
+    Ok(())
+}
+
 /// Play a WAV file using whichever player is on PATH.
 pub fn play_wav(path: &Path) -> Result<()> {
     for player in ["paplay", "pw-play", "aplay", "afplay"] {
@@ -254,4 +524,52 @@ pub fn play_wav(path: &Path) -> Result<()> {
     Err(anyhow!(
         "no audio player found (need paplay, pw-play, aplay, or afplay on macOS)"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Calibration check for the silence threshold: a full-scale i16
+    /// signal should land at 0 dBFS, half-scale at -6 dBFS, and so on.
+    /// The follow-up onset gate compares `rms_to_dbfs(rms)` against
+    /// `cfg.silence_threshold_db`; if this conversion drifts, the
+    /// onset detector silently mis-triggers or under-triggers.
+    #[test]
+    fn rms_to_dbfs_calibration() {
+        // Two bytes per sample, little-endian. A buffer of pure max-int
+        // samples should produce an RMS very close to 1.0 (full scale).
+        let full_scale: Vec<u8> = (0..1600)
+            .flat_map(|_| i16::MAX.to_le_bytes())
+            .collect();
+        let rms = compute_rms_normalised(&full_scale);
+        assert!(rms > 0.99, "expected full-scale rms ~1.0, got {rms}");
+        let db = rms_to_dbfs(rms);
+        assert!(db.abs() < 0.5, "expected ~0 dBFS, got {db}");
+
+        // Silence: all zero bytes. RMS is 0, conversion must yield
+        // -infinity so it's below any sane threshold.
+        let silence = vec![0u8; 3200];
+        let rms = compute_rms_normalised(&silence);
+        assert_eq!(rms, 0.0);
+        assert_eq!(rms_to_dbfs(rms), f32::NEG_INFINITY);
+    }
+
+    /// The user-facing default must be loose enough that a typical
+    /// home/office mic — which sits around -35 dBFS at idle — counts
+    /// as "silence" so trailing-silence detection actually fires. v1
+    /// of spec 0007 shipped with the recorder hard-coding -40 dBFS,
+    /// which was too strict and was the proximate cause of utterances
+    /// running to the full `max_seconds`. The default is the contract
+    /// the recipe in `config.example.toml` documents; if someone
+    /// changes the default they should also update the recipe.
+    #[test]
+    fn silence_threshold_default_is_user_friendly() {
+        let cfg = RecordConfig::default();
+        assert!(
+            cfg.silence_threshold_db >= -35.0 && cfg.silence_threshold_db <= -25.0,
+            "expected default silence_threshold_db in [-35, -25], got {}",
+            cfg.silence_threshold_db
+        );
+    }
 }

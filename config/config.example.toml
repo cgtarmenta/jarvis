@@ -68,6 +68,11 @@ sample_rate     = 16000
 channels        = 1
 max_seconds     = 15.0
 silence_seconds = 1.5
+silence_threshold_db = -30.0   # dBFS below which audio counts as silence.
+                                # Looser (-25.0) if your utterances get cut
+                                # off because ambient noise prevents the
+                                # silence detector from firing; tighter
+                                # (-40.0) only in a sound-treated room.
 # command         = ["arecord", "-r", "16000", "-f", "S16_LE", "{out}"]
 
 # ----------------------------------------------------------------------------

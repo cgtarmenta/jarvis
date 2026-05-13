@@ -103,6 +103,40 @@ Tradeoffs chosen consciously:
 
 ## Journal
 
+- 2026-05-13: post-ship bug fix (v1.1). The user reported during
+  live voice testing that follow-up turns cut him off
+  mid-sentence at the six-second mark, and that even the
+  fifteen-second wake-triggered turns sometimes ran to the
+  hard cap without exiting on trailing silence. Root causes
+  identified and fixed in one slice:
+
+  1. The v1 follow-up loop set `record.max_seconds =
+     followup_window_secs`, conflating "how long to wait for
+     speech to start" with "how long to let the user speak."
+     Replaced with a real onset-gated recorder:
+     `recorder::record_with_onset(cfg, onset_secs)` opens a
+     raw-PCM mic, runs RMS-based VAD on 100 ms chunks, waits
+     up to `onset_secs` for the user to start, then captures
+     the utterance bounded by the *recorder's* normal
+     `max_seconds` with the leading edge preserved. Wired
+     through `TurnOptions::wait_for_onset_secs` so it stays a
+     per-turn opt-in. New helper `TurnOptions::followup(secs)`
+     bakes the canonical shape so the daemon and any future
+     follow-up call site share one definition.
+
+  2. The trailing-silence threshold (`-40 dBFS`) was hard-coded
+     and too strict for normal microphones — ambient noise
+     never dipped that low so ffmpeg's `silenceremove` never
+     fired and the recorder ran to `max_seconds`. Made it
+     configurable as `record.silence_threshold_db` (default
+     `-30.0`, documented in `config.example.toml` with tuning
+     guidance) and threaded through `build_ffmpeg`.
+
+  Two new unit tests in `recorder::tests` (`rms_to_dbfs_calibration`,
+  `silence_threshold_default_is_user_friendly`) lock in the
+  dBFS math and the default-threshold contract so silent
+  regressions can't ship.
+
 - 2026-05-13: shipped.
 
 - 2026-05-13: implemented. Three changes landed in one slice:

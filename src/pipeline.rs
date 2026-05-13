@@ -22,31 +22,54 @@ use crate::tts;
 
 /// Per-turn overrides over what is normally read from `JarvisConfig`.
 ///
-/// The follow-up listening window (spec 0007) needs two adjustments to the
-/// standard turn: skip the audible cue (we are already mid-conversation, the
-/// cue is friction) and shorten the recording window so an empty follow-up
-/// doesn't block the daemon for the full default duration. Rather than add
-/// a half-dozen scattered boolean parameters to [`run_once`] we route both
-/// through a single `TurnOptions`.
+/// The follow-up listening window (spec 0007) needs three adjustments
+/// from the standard turn: skip the audible cue (we are already
+/// mid-conversation), allow a per-turn record override, and — most
+/// importantly — start with a speech-onset gate so we don't sit in a
+/// hard-deadline recorder cutting the user off mid-sentence.
 #[derive(Debug, Clone, Default)]
 pub struct TurnOptions {
-    /// Override the [`RecordConfig`] for this turn only. Mostly used so
-    /// the daemon's follow-up loop can shorten `max_seconds` to the
-    /// follow-up window without mutating the user's main config.
+    /// Override the [`RecordConfig`] for this turn only. Currently
+    /// unused at the call sites we ship with — kept as a hook for
+    /// future overrides like a quieter cue or a noisier-mic profile.
     pub record_override: Option<RecordConfig>,
     /// Whether to play the "I'm listening" cue at the start of the turn.
     /// Follow-up turns pass `false`; wake-triggered and hotkey turns
     /// pass `true` (the default).
     pub play_cue: bool,
+    /// If `Some(secs)`, the turn begins with an onset-gated mic open
+    /// of `secs` seconds: speech must be detected within that window
+    /// or the turn returns `Ok(None)`. When speech *is* detected the
+    /// utterance is captured up to `cfg.record.max_seconds`, with the
+    /// leading edge preserved.
+    ///
+    /// `None` (default) preserves the legacy behavior used by `jarvis
+    /// listen` and the first wake-triggered turn: open `record_to_wav`
+    /// for `cfg.record.max_seconds` and let ffmpeg's trailing-silence
+    /// detector decide when to stop.
+    pub wait_for_onset_secs: Option<f32>,
 }
 
 impl TurnOptions {
     /// Default options for the primary wake/hotkey turn: cue on, no
-    /// record override.
+    /// onset gate, no record override.
     pub fn primary() -> Self {
         Self {
             record_override: None,
             play_cue: true,
+            wait_for_onset_secs: None,
+        }
+    }
+
+    /// Options for a follow-up turn driven by `daemon::run_followup_chain`:
+    /// no cue, onset gate of `onset_secs`, no record override. The
+    /// daemon uses this directly so the wiring is canonical (one place
+    /// to change if follow-up needs another knob).
+    pub fn followup(onset_secs: f32) -> Self {
+        Self {
+            record_override: None,
+            play_cue: false,
+            wait_for_onset_secs: Some(onset_secs),
         }
     }
 }
@@ -92,7 +115,23 @@ pub fn run_turn(cfg: &JarvisConfig, opts: TurnOptions) -> Result<Option<String>>
     let record_cfg = opts.record_override.as_ref().unwrap_or(&cfg.record);
 
     info!("recording");
-    let wav = recorder::record_to_wav(record_cfg)?;
+    let wav = if let Some(onset_secs) = opts.wait_for_onset_secs {
+        // Spec 0007 v1.1: follow-up turns use an onset-gated recorder.
+        // It waits up to `onset_secs` for speech to start, then captures
+        // the full utterance bounded by the *recorder's* max_seconds —
+        // not the follow-up window itself. This fixes the v1 bug where
+        // setting `record.max_seconds = followup_window_secs` cut users
+        // off mid-sentence.
+        match recorder::record_with_onset(record_cfg, onset_secs)? {
+            Some(path) => path,
+            None => {
+                info!("follow-up: no speech within onset window");
+                return Ok(None);
+            }
+        }
+    } else {
+        recorder::record_to_wav(record_cfg)?
+    };
 
     let result = (|| -> Result<Option<String>> {
         info!("transcribing");
