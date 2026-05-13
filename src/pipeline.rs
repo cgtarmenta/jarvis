@@ -16,6 +16,7 @@ use tracing::{info, warn};
 use crate::agents;
 use crate::config::JarvisConfig;
 use crate::recorder;
+use crate::session::{self, Role};
 use crate::stt;
 use crate::tts;
 
@@ -52,10 +53,53 @@ pub fn run_once(cfg: &JarvisConfig) -> Result<Option<String>> {
         }
         info!(heard = %prompt, "user said");
 
+        // Reset-phrase short-circuit: if the entire user utterance matches
+        // one of the configured phrases (case-insensitive, accent-stripped),
+        // wipe the session and confirm. We never forward reset commands to
+        // the agent — the user said "forget" to *us*, not to Claude.
+        if cfg.session.enabled && is_reset_phrase(&prompt, &cfg.session.reset_phrases) {
+            session::reset()?;
+            info!("session reset by voice command");
+            if let Some(tts) = &tts_engine {
+                let confirmation = "Listo, empezamos de nuevo.";
+                tts.speak(confirmation)?;
+                return Ok(Some(confirmation.to_string()));
+            }
+            return Ok(Some(String::from("Session reset.")));
+        }
+
+        // Load (or implicitly create) the active session. Truncate before
+        // sending so we don't blow the model's context window — keeping
+        // only the most recent `max_turns` turns.
+        let mut sess = if cfg.session.enabled {
+            session::load_or_new(cfg.session.ttl_seconds)?
+        } else {
+            session::Session::new()
+        };
+        sess.truncate_to(cfg.session.max_turns);
+        let history = sess.turns.clone();
+        info!(
+            session_id = %sess.id,
+            history_turns = history.len(),
+            "session loaded"
+        );
+
         let reply = agent
-            .respond(&prompt)
+            .respond(&prompt, &history)
             .with_context(|| format!("agent {} failed", agent.name()))?;
         info!(reply = %reply, "agent replied");
+
+        // Persist the turn pair. We save *after* the agent call so a
+        // failure in the agent path doesn't pollute the session with an
+        // unanswered user turn.
+        if cfg.session.enabled {
+            sess.add_turn(Role::User, prompt.clone());
+            sess.add_turn(Role::Assistant, reply.clone());
+            sess.truncate_to(cfg.session.max_turns);
+            if let Err(e) = session::save(&sess) {
+                warn!(error = %e, "failed to persist session — continuing");
+            }
+        }
 
         if let Some(tts) = &tts_engine {
             if !reply.is_empty() {
@@ -69,6 +113,36 @@ pub fn run_once(cfg: &JarvisConfig) -> Result<Option<String>> {
     // around if the user explicitly asks (future flag).
     let _ = fs::remove_file(&wav);
     result
+}
+
+/// Match `prompt` against any of the configured reset phrases after
+/// normalising both sides (lowercase, accent-stripped, trimmed). We
+/// require an **exact** match on the whole utterance — otherwise a
+/// question like "puedes olvidar la última cosa?" would nuke the session.
+fn is_reset_phrase(prompt: &str, phrases: &[String]) -> bool {
+    let normalised = normalise(prompt);
+    if normalised.is_empty() {
+        return false;
+    }
+    phrases.iter().any(|p| normalise(p) == normalised)
+}
+
+fn normalise(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            'á' | 'à' | 'ä' | 'â' | 'ã' => 'a',
+            'é' | 'è' | 'ë' | 'ê' => 'e',
+            'í' | 'ì' | 'ï' | 'î' => 'i',
+            'ó' | 'ò' | 'ö' | 'ô' | 'õ' => 'o',
+            'ú' | 'ù' | 'ü' | 'û' => 'u',
+            'ñ' => 'n',
+            c => c.to_ascii_lowercase(),
+        })
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Best-effort audible "I'm listening" cue. Tries espeak-ng (universally

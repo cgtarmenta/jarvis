@@ -8,6 +8,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use super::{Agent, opt_f64, opt_string, require_env_or_opt};
+use crate::session::Turn;
 
 const DEFAULT_SYSTEM_PROMPT: &str = "You are a voice assistant. Reply in 1-3 short sentences unless the user \
      explicitly asks for detail. Plain prose — no markdown, no lists, no code \
@@ -74,21 +75,30 @@ impl Agent for OpenAiAgent {
         "openai"
     }
 
-    fn respond(&self, prompt: &str) -> Result<String> {
+    fn respond(&self, prompt: &str, history: &[Turn]) -> Result<String> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+        // Build a messages array with the system prompt up front, then
+        // each prior turn in chronological order, then the current user
+        // prompt. OpenAI handles the rest natively.
+        let mut messages = Vec::with_capacity(history.len() + 2);
+        messages.push(Message {
+            role: "system",
+            content: &self.system_prompt,
+        });
+        for turn in history {
+            messages.push(Message {
+                role: turn.role.api_role(),
+                content: &turn.content,
+            });
+        }
+        messages.push(Message {
+            role: "user",
+            content: prompt,
+        });
         let req = ChatRequest {
             model: &self.model,
             temperature: self.temperature,
-            messages: vec![
-                Message {
-                    role: "system",
-                    content: &self.system_prompt,
-                },
-                Message {
-                    role: "user",
-                    content: prompt,
-                },
-            ],
+            messages,
         };
         let body = ureq::post(&url)
             .set("authorization", &format!("Bearer {}", self.api_key))

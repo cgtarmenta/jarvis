@@ -13,6 +13,7 @@ use anyhow::{Context, Result, anyhow};
 use tracing::warn;
 
 use super::{Agent, opt_f64, opt_string, opt_string_vec};
+use crate::session::Turn;
 
 const DEFAULT_SYSTEM_PROMPT: &str = "You are a voice assistant. Reply concisely in 1-3 sentences unless the \
      user explicitly asks for detail. Avoid markdown — your reply will be \
@@ -56,7 +57,7 @@ impl Agent for ClaudeAgent {
         "claude"
     }
 
-    fn respond(&self, prompt: &str) -> Result<String> {
+    fn respond(&self, prompt: &str, history: &[Turn]) -> Result<String> {
         let mut cmd = Command::new(&self.binary);
         cmd.arg("--print");
         if let Some(sp) = &self.system_prompt {
@@ -69,6 +70,25 @@ impl Agent for ClaudeAgent {
             cmd.current_dir(cwd);
         }
 
+        // Compose history into the prompt: claude --print is stateless per
+        // invocation, so we embed prior turns as labelled "User:" /
+        // "Assistant:" blocks and end with the current "User:" turn. The
+        // model handles the conversational frame natively.
+        let full_prompt = if history.is_empty() {
+            prompt.to_string()
+        } else {
+            let mut buf = String::new();
+            for turn in history {
+                buf.push_str(turn.role.label());
+                buf.push_str(": ");
+                buf.push_str(&turn.content);
+                buf.push_str("\n\n");
+            }
+            buf.push_str("User: ");
+            buf.push_str(prompt);
+            buf
+        };
+
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -79,7 +99,7 @@ impl Agent for ClaudeAgent {
             .stdin
             .as_mut()
             .ok_or_else(|| anyhow!("claude stdin unavailable"))?
-            .write_all(prompt.as_bytes())?;
+            .write_all(full_prompt.as_bytes())?;
         // Closing stdin signals EOF so claude doesn't wait forever.
         drop(child.stdin.take());
 

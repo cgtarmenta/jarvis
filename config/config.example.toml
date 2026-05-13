@@ -168,3 +168,21 @@ name = "claude"
 # name    = "shell"
 # command = ["ollama", "run", "llama3"]
 # timeout = 60
+
+# ----------------------------------------------------------------------------
+#  Conversation session — agent continuity across wake events
+# ----------------------------------------------------------------------------
+# When enabled, each turn (recorded utterance) is appended to a JSON-backed
+# session file at ~/.cache/jarvis/sessions/current.json. The agent receives
+# the accumulated history, so "¿qué tiempo hace?" → answer → "y mañana?"
+# works without re-stating context. Saying one of the reset phrases below
+# wipes the session by voice (forwarded to NO agent — it's caught locally).
+[session]
+enabled       = true
+ttl_seconds   = 1800        # session expires after 30 min idle (0 = never)
+max_turns     = 30          # keep at most this many turns in the prompt
+reset_phrases = [
+    "olvida", "olvidalo", "olvida todo",
+    "nueva conversacion", "nueva conversación",
+    "new conversation", "forget", "forget everything", "reset",
+]

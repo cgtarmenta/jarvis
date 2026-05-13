@@ -11,6 +11,7 @@ pub mod config;
 pub mod daemon;
 pub mod pipeline;
 pub mod recorder;
+pub mod session;
 pub mod setup;
 pub mod stt;
 pub mod tts;

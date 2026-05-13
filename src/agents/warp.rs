@@ -18,6 +18,7 @@ use anyhow::{Context, Result, anyhow};
 use tracing::warn;
 
 use super::{Agent, opt_string, opt_string_vec};
+use crate::session::Turn;
 
 const DEFAULT_SYSTEM_PROMPT: &str = "You are a voice assistant. Reply with a single short paragraph (1-3 \
      sentences) of plain prose, no markdown, no code fences. Do not run \
@@ -86,13 +87,26 @@ impl WarpAgent {
 
     /// Compose the final prompt sent to `oz`. We do not have access to
     /// `--system-prompt` on oz (unlike claude), so we prepend our voice-style
-    /// instructions to the user's transcribed text. A blank line between them
-    /// keeps the agent from concatenating them when summarizing back.
-    fn compose_prompt(&self, user: &str) -> String {
-        match &self.system_prompt {
-            Some(sp) if !sp.trim().is_empty() => format!("{sp}\n\nUser: {user}"),
-            _ => user.to_string(),
+    /// instructions and the conversation history to the user's transcribed
+    /// text. Two blank lines between turns keep the agent from concatenating
+    /// them when summarizing back.
+    fn compose_prompt(&self, user: &str, history: &[Turn]) -> String {
+        let mut buf = String::new();
+        if let Some(sp) = &self.system_prompt
+            && !sp.trim().is_empty()
+        {
+            buf.push_str(sp);
+            buf.push_str("\n\n");
         }
+        for turn in history {
+            buf.push_str(turn.role.label());
+            buf.push_str(": ");
+            buf.push_str(&turn.content);
+            buf.push_str("\n\n");
+        }
+        buf.push_str("User: ");
+        buf.push_str(user);
+        buf
     }
 }
 
@@ -101,8 +115,8 @@ impl Agent for WarpAgent {
         "warp"
     }
 
-    fn respond(&self, prompt: &str) -> Result<String> {
-        let composed = self.compose_prompt(prompt);
+    fn respond(&self, prompt: &str, history: &[Turn]) -> Result<String> {
+        let composed = self.compose_prompt(prompt, history);
 
         let mut cmd = Command::new(&self.binary);
         cmd.args(["agent", "run", "--prompt", &composed]);

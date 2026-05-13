@@ -77,6 +77,13 @@ enum Cmd {
         prompt: Vec<String>,
     },
 
+    /// Inspect or manage the conversation session that the daemon and
+    /// `listen` use to maintain context across turns.
+    Session {
+        #[command(subcommand)]
+        cmd: SessionCmd,
+    },
+
     /// Diagnostic: run the configured wake backend for N seconds with
     /// verbose logging (RMS readings, transcripts, match status). Use this
     /// to tune `[wake].vad_rms_threshold` and `[wake].phrases` without
@@ -94,6 +101,16 @@ enum Cmd {
         #[arg(long)]
         phrases: Option<String>,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum SessionCmd {
+    /// Print the active session (id, age, turn count, last few turns).
+    Show,
+    /// Wipe the active session — next turn starts a new conversation.
+    Reset,
+    /// Print the absolute path to the session JSON file.
+    Path,
 }
 
 pub fn run() -> Result<()> {
@@ -120,6 +137,7 @@ pub fn run() -> Result<()> {
         Cmd::TestTts { text } => cmd_test_tts(&cfg, &text),
         Cmd::TestStt { seconds } => cmd_test_stt(&cfg, seconds),
         Cmd::TestAgent { prompt } => cmd_test_agent(&cfg, &prompt.join(" ")),
+        Cmd::Session { cmd } => cmd_session(cmd),
         Cmd::TestWake {
             seconds,
             threshold,
@@ -446,7 +464,54 @@ fn cmd_test_agent(cfg: &JarvisConfig, prompt: &str) -> Result<()> {
     };
     let agent = crate::agents::build(cfg.agent.clone())?;
     println!("Prompt: {prompt}");
-    let reply = agent.respond(prompt)?;
+    // Pass empty history for one-shot test — `test-agent` is meant for
+    // ping-style checks, not full conversation continuity. Use
+    // `jarvis listen` / `jarvis daemon` for session-backed turns.
+    let reply = agent.respond(prompt, &[])?;
     println!("Reply:  {reply}");
+    Ok(())
+}
+
+fn cmd_session(cmd: SessionCmd) -> Result<()> {
+    use crate::session;
+    match cmd {
+        SessionCmd::Path => {
+            let p = session::session_path()?;
+            println!("{}", p.display());
+        }
+        SessionCmd::Reset => {
+            session::reset()?;
+            println!("✓ session reset");
+        }
+        SessionCmd::Show => {
+            let p = session::session_path()?;
+            if !p.exists() {
+                println!("No active session ({}).", p.display());
+                return Ok(());
+            }
+            // Load with TTL=0 (disable expiry for inspection — we want
+            // to see the file even if it's older than the runtime cap).
+            let sess = session::load_or_new(0)?;
+            println!("Session: {}", sess.id);
+            println!("  path:          {}", p.display());
+            println!("  started_at:    {}", sess.started_at);
+            println!("  last_activity: {}", sess.last_activity);
+            println!("  turns:         {}", sess.turns.len());
+            if !sess.turns.is_empty() {
+                let tail = sess.turns.iter().rev().take(6).collect::<Vec<_>>();
+                println!();
+                println!("Most recent (last 6, newest first):");
+                for t in tail {
+                    let preview: String = t.content.chars().take(140).collect();
+                    let suffix = if t.content.chars().count() > 140 {
+                        " …"
+                    } else {
+                        ""
+                    };
+                    println!("  {:<10} {}{}", format!("[{:?}]", t.role), preview, suffix);
+                }
+            }
+        }
+    }
     Ok(())
 }

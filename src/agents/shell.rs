@@ -11,6 +11,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, anyhow};
 
 use super::{Agent, opt_string, opt_string_vec};
+use crate::session::Turn;
 
 pub struct ShellAgent {
     command: Vec<String>,
@@ -35,7 +36,7 @@ impl Agent for ShellAgent {
         "shell"
     }
 
-    fn respond(&self, prompt: &str) -> Result<String> {
+    fn respond(&self, prompt: &str, history: &[Turn]) -> Result<String> {
         let mut cmd = Command::new(&self.command[0]);
         cmd.args(&self.command[1..])
             .stdin(Stdio::piped())
@@ -44,6 +45,27 @@ impl Agent for ShellAgent {
         if let Some(c) = &self.cwd {
             cmd.current_dir(c);
         }
+
+        // Shell agents are the universal escape hatch — we don't know
+        // whether they speak JSON, a chat protocol, or just plain text.
+        // Stick to plain-text: emit a "labelled-turns" transcript
+        // similar to what we send claude. Any agent that doesn't care
+        // about history can ignore everything before the final `User:`.
+        let full_prompt = if history.is_empty() {
+            prompt.to_string()
+        } else {
+            let mut buf = String::new();
+            for turn in history {
+                buf.push_str(turn.role.label());
+                buf.push_str(": ");
+                buf.push_str(&turn.content);
+                buf.push_str("\n\n");
+            }
+            buf.push_str("User: ");
+            buf.push_str(prompt);
+            buf
+        };
+
         let mut child = cmd
             .spawn()
             .with_context(|| format!("spawning shell agent: {:?}", self.command[0]))?;
@@ -51,7 +73,7 @@ impl Agent for ShellAgent {
             .stdin
             .as_mut()
             .ok_or_else(|| anyhow!("shell agent stdin unavailable"))?
-            .write_all(prompt.as_bytes())?;
+            .write_all(full_prompt.as_bytes())?;
         drop(child.stdin.take());
 
         let out = child.wait_with_output()?;

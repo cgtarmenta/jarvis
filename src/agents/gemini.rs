@@ -7,6 +7,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use super::{Agent, opt_string, require_env_or_opt};
+use crate::session::{Role, Turn};
 
 const DEFAULT_SYSTEM_PROMPT: &str = "You are a voice assistant. Reply in 1-3 short sentences. Plain prose, no \
      markdown — your reply will be read aloud.";
@@ -40,6 +41,10 @@ struct GenerateRequest<'a> {
 
 #[derive(Serialize)]
 struct Content<'a> {
+    /// `user` or `model` — Gemini's nomenclature (note: "model" not
+    /// "assistant"). Optional in the API; omitted for system_instruction.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<&'a str>,
     parts: Vec<Part<'a>>,
 }
 
@@ -73,16 +78,34 @@ impl Agent for GeminiAgent {
         "gemini"
     }
 
-    fn respond(&self, prompt: &str) -> Result<String> {
+    fn respond(&self, prompt: &str, history: &[Turn]) -> Result<String> {
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
             self.model, self.api_key
         );
+        // Build a contents array from history + current prompt. Gemini
+        // calls the assistant role "model" (not "assistant" like OpenAI).
+        let mut contents = Vec::with_capacity(history.len() + 1);
+        for turn in history {
+            let role = match turn.role {
+                Role::User => "user",
+                Role::Assistant => "model",
+            };
+            contents.push(Content {
+                role: Some(role),
+                parts: vec![Part {
+                    text: &turn.content,
+                }],
+            });
+        }
+        contents.push(Content {
+            role: Some("user"),
+            parts: vec![Part { text: prompt }],
+        });
         let req = GenerateRequest {
-            contents: vec![Content {
-                parts: vec![Part { text: prompt }],
-            }],
+            contents,
             system_instruction: Content {
+                role: None,
                 parts: vec![Part {
                     text: &self.system_prompt,
                 }],

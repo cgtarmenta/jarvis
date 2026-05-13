@@ -264,6 +264,48 @@ impl Default for AgentConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default, deny_unknown_fields)]
+pub struct SessionConfig {
+    /// Master switch. `false` makes every agent turn stateless (no
+    /// history fed in, nothing persisted). `true` keeps a rolling
+    /// conversation in `~/.cache/jarvis/sessions/current.json`.
+    pub enabled: bool,
+    /// Idle seconds before the session is considered abandoned and a new
+    /// one starts. 0 disables expiry. Default 30 min.
+    pub ttl_seconds: u64,
+    /// Hard cap on turns retained in memory. Older turns are dropped
+    /// before each agent call so the prompt token budget stays bounded.
+    /// 0 means stateless even with `enabled = true`.
+    pub max_turns: usize,
+    /// Voice phrases that, when transcribed as the entire user utterance
+    /// (case-insensitive, accent-stripped), reset the session instead of
+    /// being forwarded to the agent. Lets the user start over without
+    /// going to the terminal.
+    pub reset_phrases: Vec<String>,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            ttl_seconds: 30 * 60,
+            max_turns: 30,
+            reset_phrases: vec![
+                "olvida".into(),
+                "olvidalo".into(),
+                "olvida todo".into(),
+                "nueva conversacion".into(),
+                "nueva conversación".into(),
+                "new conversation".into(),
+                "forget".into(),
+                "forget everything".into(),
+                "reset".into(),
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default, deny_unknown_fields)]
 pub struct JarvisConfig {
     /// Schema version. See `CURRENT_CONFIG_VERSION` for the changelog.
     pub config_version: u32,
@@ -274,6 +316,7 @@ pub struct JarvisConfig {
     pub stt: SttConfig,
     pub tts: TtsConfig,
     pub agent: AgentConfig,
+    pub session: SessionConfig,
 }
 
 impl Default for JarvisConfig {
@@ -287,6 +330,7 @@ impl Default for JarvisConfig {
             stt: SttConfig::default(),
             tts: TtsConfig::default(),
             agent: AgentConfig::default(),
+            session: SessionConfig::default(),
         }
     }
 }

@@ -10,6 +10,7 @@
 use anyhow::{Context, Result, anyhow};
 
 use crate::config::AgentConfig;
+use crate::session::Turn;
 
 mod claude;
 mod gemini;
@@ -25,7 +26,13 @@ pub use warp::WarpAgent;
 
 pub trait Agent {
     fn name(&self) -> &'static str;
-    fn respond(&self, prompt: &str) -> Result<String>;
+
+    /// Generate a reply to `prompt`, given an optional conversation
+    /// `history` from prior turns. Stateless agents (HTTP APIs) build a
+    /// `messages` array from `history`; CLI agents embed the history into
+    /// the prompt. An empty `history` slice means "first turn / no
+    /// continuity available" — agents must handle that case gracefully.
+    fn respond(&self, prompt: &str, history: &[Turn]) -> Result<String>;
 }
 
 /// Build the configured agent from `[agent]` block.
