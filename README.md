@@ -241,22 +241,36 @@ until the audio finishes:
 
 For a dynamic one-sentence summary instead of a fixed phrase, parse
 the hook's JSON-on-stdin (Claude Code passes `session_id` there, not
-as an env var) and pipe the answer through. Requires `jq`. **You
-must pass `--bare` to the inner `claude` invocation** — otherwise
-*it* fires the Stop hook when it finishes, which calls `claude`
-again, which fires the hook again, and so on until you `kill -9`
-something. `--bare` tells Claude Code to skip hooks. `--detach` is
-still needed on `jarvis say` so the audio playback doesn't block:
+as an env var) and pipe the answer through. Requires `jq`. Three
+guards combine here:
+
+1. **`[ -n "$JARVIS_VOICE_TURN" ] && exit 0`** — Jarvis's voice
+   pipeline (`jarvis listen` / `jarvis daemon`) sets this env var
+   when it invokes `claude --print --resume …`. The hook detects
+   it and exits early, so a voice turn doesn't end with Jarvis
+   speaking the assistant's reply *and then* speaking a summary
+   on top of it. Interactive Claude Code in a terminal doesn't set
+   the var, so the summary still fires there.
+2. **`claude --bare`** on the inner invocation — `--bare` skips
+   hooks, which prevents the inner `claude --print` from firing
+   the Stop hook itself, which would call `claude` again, which
+   would fire the hook again, until you `kill -9` something.
+3. **`jarvis say --detach`** — so the audio playback doesn't
+   block the hook (otherwise Claude Code shows "thinking" until
+   the spoken phrase finishes).
 
 ```json
 {
   "type": "command",
-  "command": "jq -r '.session_id' | xargs -I{} claude --bare --print --resume {} 'In one short sentence, what did you just finish?' | jarvis say --detach -"
+  "command": "[ -n \"$JARVIS_VOICE_TURN\" ] && exit 0; jq -r '.session_id' | xargs -I{} claude --bare --print --resume {} 'In one short sentence, what did you just finish?' | jarvis say --detach -"
 }
 ```
 
 If you don't want a `jq` dependency, a fixed phrase is a perfectly
-fine first step — and it has no recursion risk to worry about.
+fine first step — and it has no recursion risk to worry about
+(though you still want the `JARVIS_VOICE_TURN` guard if you also
+use `jarvis listen`, otherwise voice turns end with the fixed
+phrase too).
 
 ## Specs
 

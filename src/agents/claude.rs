@@ -99,6 +99,14 @@ impl Agent for ClaudeAgent {
             cmd.current_dir(cwd);
         }
 
+        // Mark this invocation as Jarvis-issued so user Stop hooks can
+        // skip themselves and avoid double-narration. The voice pipeline
+        // already speaks the assistant's full reply via TTS; if a Stop
+        // hook also speaks a one-sentence summary, the user hears two
+        // overlapping responses on every voice turn. Hooks that want to
+        // be polite to Jarvis check this env var and exit early.
+        cmd.env("JARVIS_VOICE_TURN", "1");
+
         // Compose history into the prompt: claude --print is stateless per
         // invocation, so we embed prior turns as labelled "User:" /
         // "Assistant:" blocks and end with the current "User:" turn. The
