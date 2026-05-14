@@ -56,6 +56,49 @@ fn doctor_runs_without_crashing() {
         .stdout(contains("Jarvis doctor"));
 }
 
+/// Spec 0009 (orchestrator D-3): `jarvis session show` renders the
+/// new v2 fields — `session_schema_version`, the `active_workers`
+/// map, and per-turn `dispatched_to` — when a v2 session is on
+/// disk. We seed a tempdir cache with a hand-crafted v2 session
+/// JSON and assert the CLI output names the right pieces.
+#[test]
+#[serial]
+fn session_show_renders_v2_fields() {
+    use std::fs;
+    let tmp = TempDir::new().unwrap();
+    let sessions_dir = tmp.path().join("cache").join("jarvis").join("sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    let v2 = r#"{
+        "id": "s-test",
+        "started_at": 100,
+        "last_activity": 200,
+        "session_schema_version": 2,
+        "active_workers": { "claude": "uuid-abc", "time": null },
+        "turns": [
+            {
+                "role": "user",
+                "content": "hola",
+                "timestamp": 150,
+                "dispatched_to": "claude",
+                "worker_session_id": "uuid-abc"
+            }
+        ]
+    }"#;
+    fs::write(sessions_dir.join("current.json"), v2).unwrap();
+
+    redirect_xdg(jarvis().args(["session", "show"]), &tmp)
+        .assert()
+        .success()
+        .stdout(contains("schema:        v2"))
+        .stdout(contains("active_workers:"))
+        .stdout(contains("claude"))
+        .stdout(contains("uuid-abc"))
+        .stdout(contains("time"))
+        .stdout(contains("(stateless)"))
+        // `[User → claude]` for the per-turn dispatched_to surface.
+        .stdout(contains("→ claude]"));
+}
+
 /// Spec 0008 (orchestrator C-5): `jarvis worker list` prints the
 /// registry contents. Against a fresh temp config, this exercises:
 /// (1) `ensure_workers_dir()` auto-installs the bundled starter

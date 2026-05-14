@@ -122,28 +122,6 @@ pub(crate) fn opt_string_vec(opts: &toml::Table, key: &str) -> Result<Vec<String
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Spec 0009 (orchestrator D): the `Agent` trait's default
-    /// `current_session_id` returns `None`. Stateless agents
-    /// (HTTP-based OpenAI / Gemini wrappers, the `shell` agent)
-    /// inherit this default and don't have to implement the method,
-    /// so the trait stays one-method-wide for them while
-    /// `ClaudeAgent` overrides with a real session id.
-    #[test]
-    fn agent_default_current_session_id_is_none() {
-        let mut opts = toml::Table::new();
-        opts.insert(
-            "command".into(),
-            toml::Value::Array(vec![toml::Value::String("/bin/true".into())]),
-        );
-        let shell = ShellAgent::from_options(opts).expect("shell agent constructs");
-        assert!(shell.current_session_id().is_none());
-    }
-}
-
 /// Used by `OpenAI` / `Gemini` to short-circuit when the user has not set
 /// the relevant API key.
 pub(crate) fn require_env_or_opt(
@@ -166,4 +144,26 @@ pub(crate) fn require_env_or_opt(
         env_vars.join(", ")
     ))
     .with_context(|| "agent requires an API key")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Spec 0009 (orchestrator D): the `Agent` trait's default
+    /// `current_session_id` returns `None`. Stateless agents
+    /// (HTTP-based OpenAI / Gemini wrappers, the `shell` agent)
+    /// inherit this default and don't have to implement the method,
+    /// so the trait stays one-method-wide for them while
+    /// `ClaudeAgent` overrides with a real session id.
+    #[test]
+    fn agent_default_current_session_id_is_none() {
+        let mut opts = toml::Table::new();
+        opts.insert(
+            "command".into(),
+            toml::Value::Array(vec![toml::Value::String("/bin/true".into())]),
+        );
+        let shell = ShellAgent::from_options(opts).expect("shell agent constructs");
+        assert!(shell.current_session_id().is_none());
+    }
 }
