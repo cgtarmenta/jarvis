@@ -13,14 +13,20 @@ pub mod calc;
 pub mod date_today;
 pub mod session_reset;
 pub mod spec;
+pub mod task_cancel;
+pub mod task_clean;
 pub mod task_list;
+pub mod task_show;
 pub mod time_of_day;
 
 pub use calc::CalcHandler;
 pub use date_today::DateTodayHandler;
 pub use session_reset::SessionResetHandler;
 pub use spec::SpecHandler;
+pub use task_cancel::TaskCancelHandler;
+pub use task_clean::TaskCleanHandler;
 pub use task_list::TaskListHandler;
+pub use task_show::TaskShowHandler;
 pub use time_of_day::TimeOfDayHandler;
 
 use std::sync::Arc;
@@ -84,7 +90,22 @@ pub fn register_builtins(
     registry.register_builtin(task_list_worker);
     matchers.push(Arc::new(TaskListHandler));
 
-    // 6. Session reset — short, terminal. Last because its phrase
+    // 6. Task show (spec 0012 / E2) — "muéstrame el resultado de X".
+    let task_show_worker: Arc<dyn WorkerHandle> = Arc::new(TaskShowHandler);
+    registry.register_builtin(task_show_worker);
+    matchers.push(Arc::new(TaskShowHandler));
+
+    // 7. Task cancel (spec 0012 / E2) — "cancela esa tarea".
+    let task_cancel_worker: Arc<dyn WorkerHandle> = Arc::new(TaskCancelHandler);
+    registry.register_builtin(task_cancel_worker);
+    matchers.push(Arc::new(TaskCancelHandler));
+
+    // 8. Task clean (spec 0012 / E2) — "limpia las viejas".
+    let task_clean_worker: Arc<dyn WorkerHandle> = Arc::new(TaskCleanHandler);
+    registry.register_builtin(task_clean_worker);
+    matchers.push(Arc::new(TaskCleanHandler));
+
+    // 9. Session reset — short, terminal. Last because its phrase
     //    list (`olvida`, `reset`) is so short it could match
     //    substrings of the others if we ever relax equality.
     let reset_worker: Arc<dyn WorkerHandle> =
@@ -180,8 +201,18 @@ mod tests {
         let mut registry = WorkerRegistry::default();
         let matchers = register_builtins(&mut registry, &cfg);
 
-        // Registry has all six worker entries.
-        for id in ["spec", "time", "date", "calc", "task-list", "session-reset"] {
+        // Registry has all nine worker entries.
+        for id in [
+            "spec",
+            "time",
+            "date",
+            "calc",
+            "task-list",
+            "task-show",
+            "task-cancel",
+            "task-clean",
+            "session-reset",
+        ] {
             assert!(
                 registry.get(id).is_some(),
                 "{id} worker should be registered"
@@ -189,11 +220,21 @@ mod tests {
         }
 
         // Matchers list mirrors registration order.
-        assert_eq!(matchers.len(), 6);
+        assert_eq!(matchers.len(), 9);
         let ids: Vec<&str> = matchers.iter().map(|m| m.worker_id()).collect();
         assert_eq!(
             ids,
-            vec!["spec", "time", "date", "calc", "task-list", "session-reset"]
+            vec![
+                "spec",
+                "time",
+                "date",
+                "calc",
+                "task-list",
+                "task-show",
+                "task-cancel",
+                "task-clean",
+                "session-reset",
+            ]
         );
     }
 }

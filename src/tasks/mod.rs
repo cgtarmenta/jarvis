@@ -8,6 +8,7 @@
 //! adds the registry, E1-3 the spawn + watcher mechanics, E1-4 the
 //! CLI surface, and E1-5 the voice trigger that creates tasks.
 
+pub mod cancel;
 pub mod cleanup;
 pub mod format;
 pub mod record;
@@ -16,6 +17,7 @@ pub mod resolve;
 pub mod spawn;
 pub mod triggers;
 
+pub use cancel::cancel_task;
 pub use cleanup::{autoprune_terminal_tasks, clean_old_tasks};
 pub use format::{humanise_age, humanise_age_spanish, truncate_chars};
 pub use record::{Task, TaskStatus, task_id};
