@@ -61,6 +61,7 @@ dialoguer = { version = "0.11", default-features = false, features = ["completio
 # Progress bars for model / voice downloads.
 indicatif = "0.17"
 regex = "1.12.3"
+portable-pty = "0.9.0"
 
 # Used to send SIGTERM to recorder subprocesses on timeout (parecord and
 # pw-record have no `--duration` flag, so we kill them ourselves).

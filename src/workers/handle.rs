@@ -186,9 +186,25 @@ impl WorkerHandle for ManifestWorker {
         };
         let prompt_in_argv = template.iter().any(|arg| arg.contains("{prompt}"));
 
-        // PTY support is C-6; for now plain pipes across the board.
-        // C-6 will add a branch on `self.tty()` that spawns inside a
-        // pseudo-terminal instead.
+        if self.manifest.tty {
+            self.invoke_pty(ctx, &argv, prompt_in_argv)
+        } else {
+            self.invoke_pipes(ctx, &argv, prompt_in_argv)
+        }
+    }
+}
+
+impl ManifestWorker {
+    /// Spawn the worker with plain pipes (`Stdio::piped` / `Stdio::null`
+    /// for stdin depending on whether the prompt is in argv). Keeps
+    /// stdout / stderr separate so `session_id_capture { source =
+    /// "stderr" }` works precisely.
+    fn invoke_pipes(
+        &self,
+        ctx: &WorkerInvocation<'_>,
+        argv: &[String],
+        prompt_in_argv: bool,
+    ) -> Result<WorkerResponse> {
         let mut cmd = Command::new(&argv[0]);
         cmd.args(&argv[1..]);
         if let Some(cwd) = ctx.cwd {
@@ -238,6 +254,111 @@ impl WorkerHandle for ManifestWorker {
 
         let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
         let captured_session_id = self.extract_session_id(&out.stdout, &out.stderr);
+
+        Ok(WorkerResponse {
+            text,
+            captured_session_id,
+        })
+    }
+
+    /// Spawn the worker inside a pseudo-terminal. Required for
+    /// interactive CLIs (`oz`, interactive `gemini-cli`, etc.) that
+    /// detect a non-TTY stdin/stdout and either buffer output weirdly
+    /// or refuse to run.
+    ///
+    /// PTY trade-off: stdout and stderr share the same TTY device, so
+    /// `session_id_capture::source` is functionally a hint here — the
+    /// regex matches against the *combined* output regardless of
+    /// whether the manifest specified `stdout` or `stderr`. Workers
+    /// whose session id can only be discriminated by stream should
+    /// stick with `tty = false` (the default).
+    fn invoke_pty(
+        &self,
+        ctx: &WorkerInvocation<'_>,
+        argv: &[String],
+        prompt_in_argv: bool,
+    ) -> Result<WorkerResponse> {
+        use std::io::Read as _;
+
+        use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .with_context(|| format!("opening pty for worker {:?}", self.manifest.id))?;
+
+        let mut builder = CommandBuilder::new(&argv[0]);
+        for arg in &argv[1..] {
+            builder.arg(arg);
+        }
+        if let Some(cwd) = ctx.cwd {
+            builder.cwd(cwd);
+        }
+        builder.env("JARVIS_VOICE_TURN", "1");
+
+        let mut child = pair
+            .slave
+            .spawn_command(builder)
+            .with_context(|| format!("spawning worker {:?} ({}) via pty", self.manifest.id, argv[0]))?;
+        // Drop the slave so its file descriptors close on our side;
+        // the child still holds its half, which keeps the pty alive
+        // until the child exits.
+        drop(pair.slave);
+
+        // Take a reader BEFORE the writer — `take_writer` consumes the
+        // master in some implementations, leaving no way back for a
+        // reader. Cloning the reader first is the safe order.
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .with_context(|| format!("cloning pty reader for worker {:?}", self.manifest.id))?;
+
+        if !prompt_in_argv {
+            let mut writer = pair
+                .master
+                .take_writer()
+                .with_context(|| format!("taking pty writer for worker {:?}", self.manifest.id))?;
+            writer
+                .write_all(ctx.prompt.as_bytes())
+                .with_context(|| format!("writing prompt to worker {:?} pty", self.manifest.id))?;
+            // Drop the writer so its descriptor closes — for line-
+            // buffered consumers that's the EOF signal they need.
+            drop(writer);
+        }
+
+        // Drop the master after the child has its slave half. The
+        // reader was cloned above so it still works; keeping the
+        // master handle alive forever would prevent the reader from
+        // ever seeing EOF when the child exits.
+        drop(pair.master);
+
+        let mut output = Vec::new();
+        reader
+            .read_to_end(&mut output)
+            .with_context(|| format!("reading pty output for worker {:?}", self.manifest.id))?;
+
+        let status = child
+            .wait()
+            .with_context(|| format!("waiting on worker {:?} pty child", self.manifest.id))?;
+        if !status.success() {
+            return Err(anyhow!(
+                "worker {:?} (pty) exited with {:?}: {}",
+                self.manifest.id,
+                status.exit_code(),
+                String::from_utf8_lossy(&output).trim()
+            ));
+        }
+
+        let text = String::from_utf8_lossy(&output).trim().to_string();
+        // PTY merges stdout and stderr, so the capture regex runs
+        // against the combined stream regardless of the manifest's
+        // `source` setting. Documented in `invoke_pty`'s rustdoc.
+        let captured_session_id = self.extract_session_id(&output, &output);
 
         Ok(WorkerResponse {
             text,
@@ -427,6 +548,119 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("boom"), "got: {msg}");
         assert!(msg.contains("something bad"), "got: {msg}");
+    }
+
+    /// PTY path: a worker spawned with `tty = true` sees its stdin
+    /// hooked to a real pseudo-terminal. The fixture command runs
+    /// `tty` (which fails with "not a tty" on plain pipes and prints
+    /// a device path on a PTY) plus echoes back stdin, so we can
+    /// assert both halves: (a) `/dev/pts/...` or `/dev/ttyN` appears
+    /// in the captured output, and (b) the prompt round-trips. Skips
+    /// on hosts without `tty` and `cat` on PATH — every Unix-like CI
+    /// runner has them, but the cargo-test-on-Windows future is a
+    /// trap to leave for later.
+    #[test]
+    fn manifest_worker_tty_path_spawns_in_pseudo_terminal() {
+        if which::which("tty").is_err() || which::which("cat").is_err() {
+            eprintln!("skipping: tty/cat not on PATH");
+            return;
+        }
+        let manifest = WorkerManifest {
+            id: "tty-fixture".to_string(),
+            description: None,
+            // tty(1) tests stdin; cat then echoes stdin through. The
+            // PTY makes both halves work; plain pipes would have tty
+            // fail with "not a tty" on stderr.
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "tty; cat".to_string(),
+            ],
+            initial_command: None,
+            stateful: false,
+            session_id_capture: None,
+            async_eligible: false,
+            tty: true,
+            dispatch_hint: None,
+        };
+        let worker =
+            ManifestWorker::new(manifest, PathBuf::from("test.toml")).expect("compile worker");
+        let resp = invoke(&worker, "ping-tty-roundtrip", None);
+        // tty(1) should have reported a device. /dev/pts is the
+        // typical Linux/BSD path; /dev/ttyp* on some BSDs. Be
+        // permissive about the prefix.
+        assert!(
+            resp.text.contains("/dev/"),
+            "expected tty(1) to report a /dev/... device, got: {:?}",
+            resp.text
+        );
+        // The prompt we wrote should be echoed back via cat.
+        assert!(
+            resp.text.contains("ping-tty-roundtrip"),
+            "expected prompt round-trip, got: {:?}",
+            resp.text
+        );
+    }
+
+    /// PTY path with `{prompt}` in argv (no stdin write expected) —
+    /// the worker reads its prompt from command-line args and the
+    /// PTY's write side is never touched. Covers the orthogonal
+    /// branch through `invoke_pty`.
+    #[test]
+    fn manifest_worker_tty_with_prompt_in_argv() {
+        let manifest = WorkerManifest {
+            id: "tty-argv".to_string(),
+            description: None,
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "printf 'got %s' '{prompt}'".to_string(),
+            ],
+            initial_command: None,
+            stateful: false,
+            session_id_capture: None,
+            async_eligible: false,
+            tty: true,
+            dispatch_hint: None,
+        };
+        let worker =
+            ManifestWorker::new(manifest, PathBuf::from("test.toml")).expect("compile worker");
+        let resp = invoke(&worker, "hola", None);
+        assert!(
+            resp.text.contains("got hola"),
+            "expected prompt-in-argv path, got: {:?}",
+            resp.text
+        );
+    }
+
+    /// Non-zero exit through the PTY path produces an error string
+    /// naming the worker. Mirrors the same contract the pipes path
+    /// holds — debugging shapes stay uniform.
+    #[test]
+    fn manifest_worker_tty_reports_nonzero_exit() {
+        let manifest = WorkerManifest {
+            id: "tty-boom".to_string(),
+            description: None,
+            command: vec!["sh".to_string(), "-c".to_string(), "exit 9".to_string()],
+            initial_command: None,
+            stateful: false,
+            session_id_capture: None,
+            async_eligible: false,
+            tty: true,
+            dispatch_hint: None,
+        };
+        let worker =
+            ManifestWorker::new(manifest, PathBuf::from("test.toml")).expect("compile worker");
+        let err = worker
+            .invoke(&WorkerInvocation {
+                prompt: "",
+                session_id: None,
+                cwd: None,
+            })
+            .expect_err("should fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("tty-boom"), "got: {msg}");
+        assert!(msg.contains("pty"), "expected pty branch in error: {msg}");
     }
 
     /// Construction fails if the capture regex doesn't compile. The
