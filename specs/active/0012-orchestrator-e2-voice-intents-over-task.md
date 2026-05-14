@@ -1,15 +1,14 @@
 ---
-id:
+id: 0012
 title: Orchestrator E2 — Voice intents over task registry
-status: inbox
+status: active
 owner: unassigned
 created: 2026-05-14
 shipped:
 verifying:
 related:
-  - inbox/2026-05-13-generalist-orchestrator-that-spawns-spec.md
-  - inbox/2026-05-14-orchestrator-e1-task-registry-foundation.md
-  - inbox/2026-05-14-orchestrator-a-dispatcher-trait-and-buil.md
+id: 
+shipped: 
 ---
 
 # Orchestrator E2 — Voice intents over task registry
@@ -111,6 +110,8 @@ Out of scope:
   different feature class (cron-like), not async tasks.
 
 ## Journal
+
+- 2026-05-14: promoted to active.
 
 - 2026-05-14: opened. The smallest of the children — almost
   pure voice-surface layering over E1's foundation. Blocks

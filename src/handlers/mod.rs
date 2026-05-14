@@ -13,12 +13,14 @@ pub mod calc;
 pub mod date_today;
 pub mod session_reset;
 pub mod spec;
+pub mod task_list;
 pub mod time_of_day;
 
 pub use calc::CalcHandler;
 pub use date_today::DateTodayHandler;
 pub use session_reset::SessionResetHandler;
 pub use spec::SpecHandler;
+pub use task_list::TaskListHandler;
 pub use time_of_day::TimeOfDayHandler;
 
 use std::sync::Arc;
@@ -74,7 +76,15 @@ pub fn register_builtins(
     registry.register_builtin(calc_worker);
     matchers.push(Arc::new(CalcHandler));
 
-    // 5. Session reset — short, terminal. Last because its phrase
+    // 5. Task list (spec 0012 / E2) — "qué tareas tengo", etc.
+    //    Position before session-reset because the reset phrase
+    //    list is short and shouldn't trip on a substring of a
+    //    task-list utterance.
+    let task_list_worker: Arc<dyn WorkerHandle> = Arc::new(TaskListHandler);
+    registry.register_builtin(task_list_worker);
+    matchers.push(Arc::new(TaskListHandler));
+
+    // 6. Session reset — short, terminal. Last because its phrase
     //    list (`olvida`, `reset`) is so short it could match
     //    substrings of the others if we ever relax equality.
     let reset_worker: Arc<dyn WorkerHandle> =
@@ -170,8 +180,8 @@ mod tests {
         let mut registry = WorkerRegistry::default();
         let matchers = register_builtins(&mut registry, &cfg);
 
-        // Registry has all five worker entries.
-        for id in ["spec", "time", "date", "calc", "session-reset"] {
+        // Registry has all six worker entries.
+        for id in ["spec", "time", "date", "calc", "task-list", "session-reset"] {
             assert!(
                 registry.get(id).is_some(),
                 "{id} worker should be registered"
@@ -179,8 +189,11 @@ mod tests {
         }
 
         // Matchers list mirrors registration order.
-        assert_eq!(matchers.len(), 5);
+        assert_eq!(matchers.len(), 6);
         let ids: Vec<&str> = matchers.iter().map(|m| m.worker_id()).collect();
-        assert_eq!(ids, vec!["spec", "time", "date", "calc", "session-reset"]);
+        assert_eq!(
+            ids,
+            vec!["spec", "time", "date", "calc", "task-list", "session-reset"]
+        );
     }
 }

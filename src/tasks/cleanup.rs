@@ -9,9 +9,12 @@
 
 use std::fs;
 use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use anyhow::Result;
 use tracing::warn;
 
+use super::record::TaskStatus;
 use super::registry::TaskRegistry;
 
 /// Trim the on-disk task collection so at most `max_retained`
@@ -60,6 +63,41 @@ pub fn autoprune_terminal_tasks(
         }
     }
     pruned
+}
+
+/// Remove every terminal-status task whose age (since
+/// `completion_time`, or `spawn_time` if it never recorded one)
+/// is at least `max_age`. Active tasks are never touched.
+/// Returns the count of removed task directories.
+///
+/// Backs `jarvis task clean --older-than <duration>` (CLI) and
+/// the same command exposed by voice in spec 0012 / E2.
+pub fn clean_old_tasks(base_dir: &Path, max_age: Duration) -> Result<usize> {
+    let registry = TaskRegistry::load_from_dir(base_dir);
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut removed = 0;
+    for task in registry.all() {
+        if task.status == TaskStatus::Running {
+            continue;
+        }
+        let when = task.completion_time.unwrap_or(task.spawn_time);
+        let age_secs = now_secs.saturating_sub(when);
+        if Duration::from_secs(age_secs) >= max_age {
+            let task_dir = task.dir(base_dir);
+            match fs::remove_dir_all(&task_dir) {
+                Ok(()) => removed += 1,
+                Err(e) => warn!(
+                    task_id = %task.id,
+                    error = %e,
+                    "clean: failed to remove task dir"
+                ),
+            }
+        }
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]

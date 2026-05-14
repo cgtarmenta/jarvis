@@ -1424,35 +1424,10 @@ fn cmd_task_cancel(dir: &Path, id_prefix: &str) -> Result<()> {
     }
 }
 
-fn clean_old_tasks(dir: &Path, max_age: Duration) -> Result<usize> {
-    use crate::tasks::{TaskRegistry, TaskStatus};
-    let reg = TaskRegistry::load_from_dir(dir);
-    let now_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let mut removed = 0;
-    for task in reg.all() {
-        if task.status == TaskStatus::Running {
-            continue;
-        }
-        let completion = task.completion_time.unwrap_or(task.spawn_time);
-        let age_secs = now_secs.saturating_sub(completion);
-        if Duration::from_secs(age_secs) >= max_age {
-            let task_dir = task.dir(dir);
-            if let Err(e) = std::fs::remove_dir_all(&task_dir) {
-                tracing::warn!(
-                    task_id = %task.id,
-                    error = %e,
-                    "failed to remove task dir during clean"
-                );
-            } else {
-                removed += 1;
-            }
-        }
-    }
-    Ok(removed)
-}
+// `clean_old_tasks` lives in `tasks::cleanup` so the voice
+// handler (spec 0012 / E2) can call the same function. Kept
+// as a re-import here for the CLI's `task clean` subcommand.
+use crate::tasks::clean_old_tasks;
 
 /// Build the text of `jarvis task list`. Pure function so it
 /// can be unit-tested without touching the filesystem.
@@ -1579,32 +1554,9 @@ fn parse_duration(s: &str) -> Result<Duration> {
     Ok(Duration::from_secs(secs))
 }
 
-/// "5s", "3m", "2h", "1d 4h" — short relative ages for the
-/// task list view. Skips zero components so we don't show
-/// "0d 0h 5m".
-fn humanise_age(secs: u64) -> String {
-    if secs < 60 {
-        return format!("{secs}s");
-    }
-    if secs < 3600 {
-        return format!("{}m", secs / 60);
-    }
-    if secs < 86_400 {
-        let h = secs / 3600;
-        let m = (secs % 3600) / 60;
-        if m == 0 {
-            return format!("{h}h");
-        }
-        return format!("{h}h {m}m");
-    }
-    let d = secs / 86_400;
-    let h = (secs % 86_400) / 3600;
-    if h == 0 {
-        format!("{d}d")
-    } else {
-        format!("{d}d {h}h")
-    }
-}
+// `humanise_age` lives in `tasks::format` so the voice
+// handlers (spec 0012 / E2) can format ages the same way.
+use crate::tasks::humanise_age;
 
 #[cfg(test)]
 mod task_tests {
