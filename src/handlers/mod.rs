@@ -9,11 +9,17 @@
 //! piece. Handlers stay tiny (~50-100 LoC) so adding a new one is
 //! a copy-paste pattern rather than a framework adventure.
 
+pub mod calc;
+pub mod date_today;
 pub mod session_reset;
 pub mod spec;
+pub mod time_of_day;
 
+pub use calc::CalcHandler;
+pub use date_today::DateTodayHandler;
 pub use session_reset::SessionResetHandler;
 pub use spec::SpecHandler;
+pub use time_of_day::TimeOfDayHandler;
 
 use std::sync::Arc;
 
@@ -50,8 +56,27 @@ pub fn register_builtins(
     registry.register_builtin(spec_worker);
     matchers.push(Arc::new(SpecHandler));
 
-    // 2. Session reset — the user's `reset_phrases` from config,
-    //    matched as exact normalised equality. Short, terminal.
+    // 2. Time — "qué hora es" / "what time is it", optional city.
+    let time_worker: Arc<dyn WorkerHandle> = Arc::new(TimeOfDayHandler);
+    registry.register_builtin(time_worker);
+    matchers.push(Arc::new(TimeOfDayHandler));
+
+    // 3. Date — "qué fecha", "what date is it".
+    let date_worker: Arc<dyn WorkerHandle> = Arc::new(DateTodayHandler);
+    registry.register_builtin(date_worker);
+    matchers.push(Arc::new(DateTodayHandler));
+
+    // 4. Calc — arithmetic with spoken-word numbers and operators.
+    //    Triggers like "cuánto es" / "calculate" require the tail
+    //    to look numeric; non-arithmetic prompts with those trigger
+    //    words still fall through.
+    let calc_worker: Arc<dyn WorkerHandle> = Arc::new(CalcHandler);
+    registry.register_builtin(calc_worker);
+    matchers.push(Arc::new(CalcHandler));
+
+    // 5. Session reset — short, terminal. Last because its phrase
+    //    list (`olvida`, `reset`) is so short it could match
+    //    substrings of the others if we ever relax equality.
     let reset_worker: Arc<dyn WorkerHandle> =
         Arc::new(SessionResetHandler::new(cfg.session.reset_phrases.clone()));
     registry.register_builtin(reset_worker);
@@ -69,23 +94,24 @@ mod tests {
     /// Smoke: `register_builtins` populates the registry and the
     /// matchers list in lockstep. Each handler appears as both an
     /// active worker (for invoke) and an intent matcher (for
-    /// dispatch). Spec handler comes before session-reset.
+    /// dispatch). Order is spec → time → date → calc → reset.
     #[test]
     fn register_builtins_dual_registration() {
         let cfg = JarvisConfig::default();
         let mut registry = WorkerRegistry::default();
         let matchers = register_builtins(&mut registry, &cfg);
 
-        // Registry has both worker entries.
-        assert!(registry.get("spec").is_some(), "spec worker registered");
-        assert!(
-            registry.get("session-reset").is_some(),
-            "session-reset worker registered"
-        );
+        // Registry has all five worker entries.
+        for id in ["spec", "time", "date", "calc", "session-reset"] {
+            assert!(
+                registry.get(id).is_some(),
+                "{id} worker should be registered"
+            );
+        }
 
-        // Matchers list is ordered spec → session-reset.
-        assert_eq!(matchers.len(), 2);
-        assert_eq!(matchers[0].worker_id(), "spec");
-        assert_eq!(matchers[1].worker_id(), "session-reset");
+        // Matchers list mirrors registration order.
+        assert_eq!(matchers.len(), 5);
+        let ids: Vec<&str> = matchers.iter().map(|m| m.worker_id()).collect();
+        assert_eq!(ids, vec!["spec", "time", "date", "calc", "session-reset"]);
     }
 }
