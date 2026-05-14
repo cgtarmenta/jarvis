@@ -9,5 +9,7 @@
 //! CLI surface, and E1-5 the voice trigger that creates tasks.
 
 pub mod record;
+pub mod registry;
 
 pub use record::{Task, TaskStatus, task_id};
+pub use registry::TaskRegistry;
