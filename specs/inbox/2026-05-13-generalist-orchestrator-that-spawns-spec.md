@@ -266,15 +266,25 @@ Dependency rules:
 - **B and E2 are independent of each other** and both land after A
   and E1 respectively.
 
-Status of children (created in `inbox/` alongside this umbrella):
-- `inbox/2026-05-14-orchestrator-c-worker-manifests-and-auto.md`
-- `inbox/2026-05-14-orchestrator-d-multi-worker-memory-schem.md`
-- `inbox/2026-05-14-orchestrator-a-dispatcher-trait-and-buil.md`
-- `inbox/2026-05-14-orchestrator-e1-task-registry-foundation.md`
-- `inbox/2026-05-14-orchestrator-b-llm-dispatcher-backends.md`
-- `inbox/2026-05-14-orchestrator-e2-voice-intents-over-task.md`
+Status of children:
+- ✅ **shipped** `shipped/0008-orchestrator-c-worker-manifests-and-auto.md` (2026-05-14)
+- 📥 inbox  `inbox/2026-05-14-orchestrator-d-multi-worker-memory-schem.md`
+- 📥 inbox  `inbox/2026-05-14-orchestrator-a-dispatcher-trait-and-buil.md`
+- 📥 inbox  `inbox/2026-05-14-orchestrator-e1-task-registry-foundation.md`
+- 📥 inbox  `inbox/2026-05-14-orchestrator-b-llm-dispatcher-backends.md`
+- 📥 inbox  `inbox/2026-05-14-orchestrator-e2-voice-intents-over-task.md`
 
 ## Journal
+
+- 2026-05-14: hija C shipped (`0008`). The orchestrator's
+  declarative foundation is now in master: worker manifests,
+  autodiscovery, the `WorkerHandle` trait shared by built-in
+  handlers and external manifests, the starter `claude.toml`
+  auto-installed on first run, the `jarvis worker list`
+  surface, and PTY support for future interactive workers.
+  ClaudeAgent reduced to a registry shim with backwards-compat
+  fallback. Suite went from 43 → 94 tests. See
+  `shipped/0008-...` for slice-by-slice detail.
 
 - 2026-05-13: opened as a vision note at the end of a
   follow-up debugging session. The user's exact words:

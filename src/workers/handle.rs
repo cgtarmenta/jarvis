@@ -550,6 +550,68 @@ mod tests {
         assert!(msg.contains("something bad"), "got: {msg}");
     }
 
+    /// `JARVIS_VOICE_TURN=1` must reach every spawned worker. Stop
+    /// hooks downstream observe this env var to skip themselves and
+    /// avoid double-narration (see `feedback_stop_hook_recursion`
+    /// memory). Without this contract the orchestrator would
+    /// regress the fix shipped in spec 0007 the moment a worker
+    /// runs through the registry instead of the bespoke
+    /// `src/agents/claude.rs` env-setter.
+    #[test]
+    fn manifest_worker_env_carries_jarvis_voice_turn() {
+        let manifest = WorkerManifest {
+            id: "env-probe".to_string(),
+            description: None,
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "printf 'JVT=%s' \"$JARVIS_VOICE_TURN\"".to_string(),
+            ],
+            initial_command: None,
+            stateful: false,
+            session_id_capture: None,
+            async_eligible: false,
+            tty: false,
+            dispatch_hint: None,
+        };
+        let worker =
+            ManifestWorker::new(manifest, PathBuf::from("test.toml")).expect("compile worker");
+        let resp = invoke(&worker, "ignored", None);
+        assert_eq!(resp.text, "JVT=1");
+    }
+
+    /// `session_id_capture` with `source = "stderr"` reads from stderr
+    /// instead of stdout. The plain-pipes path keeps the streams
+    /// separate (unlike the PTY path), so this lets workers that emit
+    /// their session id to stderr (some interactive CLIs do) work
+    /// out of the box.
+    #[test]
+    fn manifest_worker_captures_session_id_from_stderr() {
+        let manifest = WorkerManifest {
+            id: "stderr-cap".to_string(),
+            description: None,
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "echo 'Session: feed-face' >&2; printf reply".to_string(),
+            ],
+            initial_command: None,
+            stateful: true,
+            session_id_capture: Some(SessionIdCapture {
+                source: SessionIdSource::Stderr,
+                regex: r"Session: ([a-z0-9-]+)".to_string(),
+            }),
+            async_eligible: false,
+            tty: false,
+            dispatch_hint: None,
+        };
+        let worker =
+            ManifestWorker::new(manifest, PathBuf::from("test.toml")).expect("compile worker");
+        let resp = invoke(&worker, "ignored", None);
+        assert_eq!(resp.text, "reply");
+        assert_eq!(resp.captured_session_id.as_deref(), Some("feed-face"));
+    }
+
     /// PTY path: a worker spawned with `tty = true` sees its stdin
     /// hooked to a real pseudo-terminal. The fixture command runs
     /// `tty` (which fails with "not a tty" on plain pipes and prints
