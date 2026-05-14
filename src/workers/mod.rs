@@ -6,8 +6,10 @@
 //! substitution live here; the registry, handle trait, autodiscovery, and
 //! CLI surface land in subsequent commits as we work through the C slices.
 
+pub mod handle;
 pub mod manifest;
 pub mod registry;
 
+pub use handle::{ManifestWorker, WorkerHandle, WorkerInvocation, WorkerResponse};
 pub use manifest::{KNOWN_PLACEHOLDERS, SessionIdCapture, SessionIdSource, WorkerManifest};
 pub use registry::{DisabledWorker, WorkerRegistry, load_default};

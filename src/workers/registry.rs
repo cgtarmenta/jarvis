@@ -11,10 +11,12 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tracing::warn;
 
+use super::handle::{ManifestWorker, WorkerHandle};
 use super::manifest::WorkerManifest;
 use crate::config;
 
@@ -33,19 +35,43 @@ pub struct DisabledWorker {
     pub reason: String,
 }
 
-/// The result of scanning a worker manifest directory.
-#[derive(Debug, Default)]
+/// The result of scanning a worker manifest directory, plus any
+/// built-in handlers registered programmatically (via
+/// `register_builtin`). Stores trait objects so the dispatcher sees one
+/// uniform `WorkerHandle` regardless of origin.
+#[derive(Default)]
 pub struct WorkerRegistry {
-    /// Active workers, keyed by manifest id. Insertion order is preserved
-    /// — the autodiscovery sort order (alphabetical by filename) matters
-    /// because the dispatcher uses it as a tie-break for hints.
-    active: Vec<WorkerManifest>,
+    /// Active workers, keyed by id. Insertion order is preserved:
+    /// alphabetical by filename for manifest-loaded workers, then
+    /// registration order for built-in handlers. Order matters for
+    /// duplicate-id resolution (first one in wins) and for the
+    /// dispatcher's tie-breaks.
+    active: Vec<Arc<dyn WorkerHandle>>,
     /// Index from id → position in `active`. Cheap lookups without
     /// disturbing iteration order.
     by_id: HashMap<String, usize>,
     /// Manifests that couldn't be loaded. Reported by `jarvis worker
     /// list`; never silently ignored.
     disabled: Vec<DisabledWorker>,
+}
+
+impl std::fmt::Debug for WorkerRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Custom Debug because trait objects don't auto-derive it.
+        // We only need it for assertions and log lines, so a summary
+        // is enough.
+        f.debug_struct("WorkerRegistry")
+            .field(
+                "active_ids",
+                &self
+                    .active
+                    .iter()
+                    .map(|w| w.id().to_string())
+                    .collect::<Vec<_>>(),
+            )
+            .field("disabled", &self.disabled)
+            .finish()
+    }
 }
 
 impl WorkerRegistry {
@@ -122,31 +148,18 @@ impl WorkerRegistry {
             }
         };
 
-        // Cross-manifest checks: id uniqueness. We don't track source
-        // paths for active manifests in v1, so the conflict message
-        // just names the offending id — `worker list` can fill in
-        // the surrounding picture.
+        // Cross-manifest checks: id uniqueness across actives (which
+        // covers both prior manifests and any built-ins registered
+        // before this load — built-ins typically register *after*
+        // load_from_dir today, but the rule is symmetric either way).
         if self.by_id.contains_key(&manifest.id) {
             self.disabled.push(DisabledWorker {
                 source: path.to_path_buf(),
                 id: Some(manifest.id.clone()),
                 reason: format!(
-                    "duplicate id {:?}: an earlier manifest with this id is already loaded",
+                    "duplicate id {:?}: an earlier worker with this id is already loaded",
                     manifest.id
                 ),
-            });
-            return;
-        }
-
-        // Compile session_id_capture regex once at load time so the
-        // dispatcher never has to. Bad regex disables the worker.
-        if let Some(cap) = &manifest.session_id_capture
-            && let Err(e) = regex::Regex::new(&cap.regex)
-        {
-            self.disabled.push(DisabledWorker {
-                source: path.to_path_buf(),
-                id: Some(manifest.id.clone()),
-                reason: format!("session_id_capture.regex did not compile: {e}"),
             });
             return;
         }
@@ -164,18 +177,33 @@ impl WorkerRegistry {
             return;
         }
 
-        // All checks passed: register active.
-        self.by_id.insert(manifest.id.clone(), self.active.len());
-        self.active.push(manifest);
+        // Construct the `ManifestWorker` which also compiles the
+        // `session_id_capture` regex if any. Failure here surfaces as
+        // the worker being disabled, never a daemon crash.
+        let worker_id = manifest.id.clone();
+        let worker = match ManifestWorker::new(manifest, path.to_path_buf()) {
+            Ok(w) => w,
+            Err(e) => {
+                self.disabled.push(DisabledWorker {
+                    source: path.to_path_buf(),
+                    id: Some(worker_id),
+                    reason: format!("{e:#}"),
+                });
+                return;
+            }
+        };
+
+        self.by_id.insert(worker.id().to_string(), self.active.len());
+        self.active.push(Arc::new(worker));
     }
 
-    /// Lookup an active worker by id. Disabled workers are *not* returned —
-    /// the dispatcher should treat them as nonexistent.
-    pub fn get(&self, id: &str) -> Option<&WorkerManifest> {
-        self.by_id.get(id).map(|&i| &self.active[i])
+    /// Look up an active worker by id. Disabled workers are *not*
+    /// returned — the dispatcher should treat them as nonexistent.
+    pub fn get(&self, id: &str) -> Option<Arc<dyn WorkerHandle>> {
+        self.by_id.get(id).map(|&i| Arc::clone(&self.active[i]))
     }
 
-    pub fn active_workers(&self) -> &[WorkerManifest] {
+    pub fn active_workers(&self) -> &[Arc<dyn WorkerHandle>] {
         &self.active
     }
 
@@ -183,10 +211,30 @@ impl WorkerRegistry {
         &self.disabled
     }
 
-    /// Total count of manifest files we touched (active + disabled).
+    /// Total count of workers we know about (active + disabled).
     /// Useful for the "Loaded N workers (M disabled)" log line.
     pub fn total_seen(&self) -> usize {
         self.active.len() + self.disabled.len()
+    }
+
+    /// Register a built-in handler. Hija A's `time` / `calc` / `spec` /
+    /// `session-reset` handlers register themselves through this method
+    /// at daemon startup. If a manifest with the same id was already
+    /// loaded, the built-in is rejected (manifest authors can override
+    /// built-ins by giving their manifest the same id — useful for
+    /// power users who want different behaviour for `time`).
+    pub fn register_builtin(&mut self, handler: Arc<dyn WorkerHandle>) {
+        let id = handler.id().to_string();
+        if self.by_id.contains_key(&id) {
+            self.disabled.push(DisabledWorker {
+                source: PathBuf::from(format!("<built-in: {id}>")),
+                id: Some(id),
+                reason: "shadowed by a manifest with the same id".to_string(),
+            });
+            return;
+        }
+        self.by_id.insert(id, self.active.len());
+        self.active.push(handler);
     }
 }
 
@@ -394,6 +442,86 @@ mod tests {
         assert_eq!(reg.active_workers().len(), 1);
         assert_eq!(reg.disabled_workers().len(), 1);
         assert_eq!(reg.total_seen(), 2);
+    }
+
+    /// Built-in handlers register through `register_builtin`. Once
+    /// registered they show up in `active_workers` alongside any
+    /// manifest-loaded entries and are retrievable via `get`. Hija A
+    /// is the consumer of this method; v1 of C only sets up the
+    /// mechanism. The test uses a tiny inline `WorkerHandle` impl so
+    /// the contract is verified without depending on hija A.
+    #[test]
+    fn register_builtin_adds_handler() {
+        use super::super::handle::{WorkerHandle, WorkerInvocation, WorkerResponse};
+
+        struct FakeBuiltin;
+        impl WorkerHandle for FakeBuiltin {
+            fn id(&self) -> &str {
+                "fake"
+            }
+            fn invoke(&self, _: &WorkerInvocation<'_>) -> anyhow::Result<WorkerResponse> {
+                Ok(WorkerResponse {
+                    text: "ok".to_string(),
+                    captured_session_id: None,
+                })
+            }
+        }
+
+        let mut reg = WorkerRegistry::default();
+        reg.register_builtin(Arc::new(FakeBuiltin));
+        assert_eq!(reg.active_workers().len(), 1);
+        let w = reg.get("fake").expect("fake registered");
+        assert_eq!(w.id(), "fake");
+        assert!(w.source_path().is_none(), "built-ins have no source path");
+    }
+
+    /// A built-in registered after a manifest with the same id is
+    /// rejected (the manifest wins). Lets users override built-ins by
+    /// dropping a manifest with the matching id — same rule, reverse
+    /// direction.
+    #[test]
+    fn manifest_shadows_builtin_with_same_id() {
+        use super::super::handle::{WorkerHandle, WorkerInvocation, WorkerResponse};
+
+        struct Shadowed;
+        impl WorkerHandle for Shadowed {
+            fn id(&self) -> &str {
+                "shell"
+            }
+            fn invoke(&self, _: &WorkerInvocation<'_>) -> anyhow::Result<WorkerResponse> {
+                unreachable!("built-in should be disabled")
+            }
+        }
+
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "shell.toml",
+            r#"
+                id = "shell"
+                command = ["sh", "-c", "{prompt}"]
+            "#,
+        );
+        let mut reg = WorkerRegistry::load_from_dir(tmp.path());
+        assert_eq!(reg.active_workers().len(), 1);
+
+        reg.register_builtin(Arc::new(Shadowed));
+        // Still one active (the manifest); built-in went to disabled.
+        assert_eq!(reg.active_workers().len(), 1);
+        let disabled = reg
+            .disabled_workers()
+            .iter()
+            .find(|d| d.id.as_deref() == Some("shell"))
+            .expect("built-in disabled");
+        assert!(disabled.reason.contains("shadowed"));
+        assert!(
+            disabled
+                .source
+                .to_string_lossy()
+                .contains("built-in"),
+            "got source: {}",
+            disabled.source.display()
+        );
     }
 
     /// Non-toml files in the workers dir are ignored. Common case: a
