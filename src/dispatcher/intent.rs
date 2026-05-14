@@ -53,6 +53,13 @@ impl BuiltinIntentDispatcher {
         self
     }
 
+    /// Build a dispatcher from a pre-assembled matcher list — the
+    /// shape `handlers::register_builtins` returns. Equivalent to
+    /// `new()` + repeated `push`; just less verbose at the call site.
+    pub fn from_matchers(matchers: Vec<Arc<dyn IntentMatcher>>) -> Self {
+        Self { matchers }
+    }
+
     pub fn matcher_count(&self) -> usize {
         self.matchers.len()
     }

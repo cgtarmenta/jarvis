@@ -91,6 +91,75 @@ pub fn register_builtins(
 mod tests {
     use super::*;
 
+    /// End-to-end smoke for the spec 0010 cascade: a few
+    /// representative prompts get routed to the right worker
+    /// through the same composition the pipeline assembles. The
+    /// default-worker stage at the end catches anything the
+    /// built-in matchers decline.
+    #[test]
+    fn full_cascade_routes_prompts_to_expected_workers() {
+        use crate::dispatcher::{
+            BuiltinIntentDispatcher, CascadeDispatcher, DefaultWorkerDispatcher, Dispatcher,
+        };
+        use crate::session::Session;
+
+        let cfg = JarvisConfig::default();
+        let mut registry = WorkerRegistry::default();
+        let matchers = register_builtins(&mut registry, &cfg);
+        let cascade = CascadeDispatcher::new()
+            .push(Box::new(BuiltinIntentDispatcher::from_matchers(matchers)))
+            .push(Box::new(DefaultWorkerDispatcher::new("claude")));
+        let session = Session::new();
+
+        // Time query → time handler (stage 1).
+        let d = cascade
+            .dispatch("¿qué hora es?", &session, &registry)
+            .unwrap()
+            .unwrap();
+        assert_eq!(d.worker_id, "time", "time query → time handler");
+
+        // Date query → date handler.
+        let d = cascade
+            .dispatch("qué día es hoy", &session, &registry)
+            .unwrap()
+            .unwrap();
+        assert_eq!(d.worker_id, "date", "date query → date handler");
+
+        // Arithmetic → calc handler.
+        let d = cascade
+            .dispatch("cuánto es dos más tres", &session, &registry)
+            .unwrap()
+            .unwrap();
+        assert_eq!(d.worker_id, "calc", "arithmetic → calc handler");
+
+        // Spec phrase → spec handler.
+        let d = cascade
+            .dispatch("abre un spec para streaming TTS", &session, &registry)
+            .unwrap()
+            .unwrap();
+        assert_eq!(d.worker_id, "spec", "spec phrase → spec handler");
+
+        // Reset phrase → session-reset handler.
+        let d = cascade
+            .dispatch("olvida todo", &session, &registry)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            d.worker_id, "session-reset",
+            "reset phrase → session-reset handler"
+        );
+
+        // Unrelated prompt → falls through to the default (claude).
+        let d = cascade
+            .dispatch("explícame los protocolos de gossip", &session, &registry)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            d.worker_id, "claude",
+            "unmatched prompt → default worker (claude)"
+        );
+    }
+
     /// Smoke: `register_builtins` populates the registry and the
     /// matchers list in lockstep. Each handler appears as both an
     /// active worker (for invoke) and an intent matcher (for

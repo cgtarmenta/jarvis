@@ -289,7 +289,7 @@ pub fn run() -> Result<()> {
         Cmd::Session { cmd } => cmd_session(cmd),
         Cmd::Spec { cmd } => cmd_spec(cmd),
         Cmd::Agent { cmd } => cmd_agent(&cfg, cmd),
-        Cmd::Worker { cmd } => cmd_worker(cmd),
+        Cmd::Worker { cmd } => cmd_worker(cmd, &cfg),
         Cmd::TestWake {
             seconds,
             threshold,
@@ -1111,19 +1111,24 @@ fn cmd_agent_claude(cfg: &JarvisConfig, cmd: AgentCmd) -> Result<()> {
     Ok(())
 }
 
-fn cmd_worker(cmd: WorkerCmd) -> Result<()> {
+fn cmd_worker(cmd: WorkerCmd, cfg: &JarvisConfig) -> Result<()> {
     match cmd {
-        WorkerCmd::List => cmd_worker_list(),
+        WorkerCmd::List => cmd_worker_list(cfg),
     }
 }
 
-fn cmd_worker_list() -> Result<()> {
+fn cmd_worker_list(cfg: &JarvisConfig) -> Result<()> {
     // Ensure the workers directory exists (and the starter manifest)
     // before listing, so a fresh install shows something meaningful
     // instead of an empty registry.
     let _ = config::ensure_workers_dir();
     let dir = config::workers_dir()?;
-    let registry = crate::workers::WorkerRegistry::load_from_dir(&dir);
+    let mut registry = crate::workers::WorkerRegistry::load_from_dir(&dir);
+    // Register the built-in handlers (spec 0010 A-2/A-3) so they
+    // appear alongside manifest workers. Without this they only
+    // surface from the pipeline's per-turn registry build; the
+    // user wouldn't see them from `worker list`.
+    let _ = crate::handlers::register_builtins(&mut registry, cfg);
     print!("{}", format_worker_list(&dir, &registry));
     Ok(())
 }

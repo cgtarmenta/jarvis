@@ -14,11 +14,16 @@ use anyhow::{Context, Result};
 use tracing::{info, warn};
 
 use crate::agents;
-use crate::config::{JarvisConfig, RecordConfig};
+use crate::config::{self as cfg_mod, JarvisConfig, RecordConfig};
+use crate::dispatcher::{
+    BuiltinIntentDispatcher, CascadeDispatcher, DefaultWorkerDispatcher, Dispatcher,
+};
+use crate::handlers;
 use crate::recorder;
 use crate::session::{self, Role};
 use crate::stt;
 use crate::tts;
+use crate::workers::{WorkerInvocation, WorkerRegistry, WorkerResponse};
 
 /// Per-turn overrides over what is normally read from `JarvisConfig`.
 ///
@@ -142,39 +147,9 @@ pub fn run_turn(cfg: &JarvisConfig, opts: TurnOptions) -> Result<Option<String>>
         }
         info!(heard = %prompt, "user said");
 
-        // Reset-phrase short-circuit: if the entire user utterance matches
-        // one of the configured phrases (case-insensitive, accent-stripped),
-        // wipe the session and confirm. We never forward reset commands to
-        // the agent — the user said "forget" to *us*, not to Claude.
-        if cfg.session.enabled && is_reset_phrase(&prompt, &cfg.session.reset_phrases) {
-            session::reset()?;
-            info!("session reset by voice command");
-            if let Some(tts) = &tts_engine {
-                let confirmation = "Listo, empezamos de nuevo.";
-                tts.speak(confirmation)?;
-                return Ok(Some(confirmation.to_string()));
-            }
-            return Ok(Some(String::from("Session reset.")));
-        }
-
-        // Spec-management intent: "abre un spec para X", "promote 14",
-        // etc. These are handled deterministically — never forwarded to
-        // the agent because filesystem mutations should not be the LLM's
-        // job. The handler returns a short TTS-friendly summary.
-        if let Some(intent) = crate::specs::recognize(&prompt) {
-            info!(?intent, "spec intent recognised");
-            let reply = crate::specs::execute(intent);
-            if let Some(tts) = &tts_engine
-                && !reply.is_empty()
-            {
-                tts.speak(&reply)?;
-            }
-            return Ok(Some(reply));
-        }
-
-        // Load (or implicitly create) the active session. Truncate before
-        // sending so we don't blow the model's context window — keeping
-        // only the most recent `max_turns` turns.
+        // Load the session up front so the dispatcher's matchers can
+        // consult prior `active_workers` state and history when
+        // resolving follow-ups (spec D + hija A contract).
         let mut sess = if cfg.session.enabled {
             session::load_or_new(cfg.session.ttl_seconds)?
         } else {
@@ -188,43 +163,87 @@ pub fn run_turn(cfg: &JarvisConfig, opts: TurnOptions) -> Result<Option<String>>
             "session loaded"
         );
 
-        // Spec 0009 (orchestrator D): capture the worker's current
-        // session id *before* the call so the turn record reflects
-        // what was actually resumed. Stateful agents (Claude with
-        // its attach UUID) return Some; stateless agents return None.
-        let worker_session_id = agent.current_session_id();
-        let worker_id = agent.name().to_string();
+        // Spec 0010 (orchestrator A): build the dispatcher cascade
+        // and let it pick the worker for this turn. Stage 1 is the
+        // built-in handlers (time, calc, spec, session-reset, etc.)
+        // matching deterministic phrases. Stage 2 (LLM dispatcher,
+        // hija B) is empty for now. Stage 3 is the configured
+        // default worker — almost always `cfg.agent.name`.
+        let mut registry = WorkerRegistry::load_from_dir(
+            &cfg_mod::workers_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        );
+        let matchers = handlers::register_builtins(&mut registry, cfg);
+        let dispatcher = CascadeDispatcher::new()
+            .push(Box::new(BuiltinIntentDispatcher::from_matchers(matchers)))
+            .push(Box::new(DefaultWorkerDispatcher::new(
+                cfg.agent.name.clone(),
+            )));
 
-        let reply = agent
-            .respond(&prompt, &history)
-            .with_context(|| format!("agent {} failed", agent.name()))?;
+        let decision = dispatcher
+            .dispatch(&prompt, &sess, &registry)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "dispatcher returned None — cascade is mis-configured (no default stage)"
+                )
+            })?;
+        info!(
+            worker = %decision.worker_id,
+            session_id = ?decision.session_id,
+            "dispatched"
+        );
+
+        // Resolve and invoke. Built-in handlers and the bundled
+        // claude manifest live in the registry; non-claude legacy
+        // agents (openai, gemini, warp, shell) don't have manifests
+        // yet (deferred from spec C), so we keep their
+        // `Agent`-trait path alive as a fallback.
+        let response = if let Some(worker) = registry.get(&decision.worker_id) {
+            worker
+                .invoke(&WorkerInvocation {
+                    prompt: &decision.resolved_prompt,
+                    session_id: decision.session_id.as_deref(),
+                    cwd: None,
+                })
+                .with_context(|| format!("worker {:?} failed", decision.worker_id))?
+        } else {
+            // Legacy Agent fallback: still requires history-embedded
+            // prompt because non-claude agents are stateless from
+            // Jarvis's POV.
+            let text = agent
+                .respond(&decision.resolved_prompt, &history)
+                .with_context(|| format!("legacy agent {} failed", agent.name()))?;
+            WorkerResponse {
+                text,
+                captured_session_id: agent.current_session_id(),
+            }
+        };
+        let reply = response.text.clone();
         info!(reply = %reply, "agent replied");
 
-        // Persist the turn pair with full dispatch metadata. We save
-        // *after* the agent call so a failure in the agent path
-        // doesn't pollute the session with an unanswered user turn.
+        // Persist the turn pair with full dispatch metadata.
         if cfg.session.enabled {
+            // For stateful workers that captured a new session id
+            // mid-invocation (via session_id_capture rules),
+            // prefer that; otherwise carry the pre-invocation id
+            // through. Either way `worker_session_id` on the
+            // recorded turn reflects what was actually used.
+            let effective_session_id = response
+                .captured_session_id
+                .clone()
+                .or_else(|| decision.session_id.clone());
             sess.add_turn_for_worker(
                 Role::User,
                 prompt.clone(),
-                worker_id.clone(),
-                worker_session_id.clone(),
+                decision.worker_id.clone(),
+                effective_session_id.clone(),
             );
             sess.add_turn_for_worker(
                 Role::Assistant,
                 reply.clone(),
-                worker_id.clone(),
-                worker_session_id.clone(),
+                decision.worker_id.clone(),
+                effective_session_id.clone(),
             );
-            // Record this worker's most recently-known session id in
-            // the active_workers map. For Claude this is the attach
-            // UUID; for stateless agents it's `None`. Spec D's
-            // contract: the map is the dispatcher's per-thread
-            // "who's holding which session" registry. Hija A will
-            // extend this with session-id-capture for newly-spawned
-            // workers; today it's just whatever the agent surfaced
-            // pre-invocation, which captures the resume case.
-            sess.set_active_worker_session(worker_id, worker_session_id);
+            sess.set_active_worker_session(decision.worker_id.clone(), effective_session_id);
             sess.truncate_to(cfg.session.max_turns);
             if let Err(e) = session::save(&sess) {
                 warn!(error = %e, "failed to persist session — continuing");
@@ -243,36 +262,6 @@ pub fn run_turn(cfg: &JarvisConfig, opts: TurnOptions) -> Result<Option<String>>
     // around if the user explicitly asks (future flag).
     let _ = fs::remove_file(&wav);
     result
-}
-
-/// Match `prompt` against any of the configured reset phrases after
-/// normalising both sides (lowercase, accent-stripped, trimmed). We
-/// require an **exact** match on the whole utterance — otherwise a
-/// question like "puedes olvidar la última cosa?" would nuke the session.
-fn is_reset_phrase(prompt: &str, phrases: &[String]) -> bool {
-    let normalised = normalise(prompt);
-    if normalised.is_empty() {
-        return false;
-    }
-    phrases.iter().any(|p| normalise(p) == normalised)
-}
-
-fn normalise(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            'á' | 'à' | 'ä' | 'â' | 'ã' => 'a',
-            'é' | 'è' | 'ë' | 'ê' => 'e',
-            'í' | 'ì' | 'ï' | 'î' => 'i',
-            'ó' | 'ò' | 'ö' | 'ô' | 'õ' => 'o',
-            'ú' | 'ù' | 'ü' | 'û' => 'u',
-            'ñ' => 'n',
-            c => c.to_ascii_lowercase(),
-        })
-        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// Best-effort audible "I'm listening" cue. Tries espeak-ng (universally
