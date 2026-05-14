@@ -57,14 +57,21 @@ endpoint like Groq / Fireworks (best latency for the money).
       validating the id against the live registry. *(B-1,
       shipped ecb28fe; landed as a directory module
       `src/dispatcher/llm/` once B-2 added the second file.)*
-- [ ] `OzCliBackend` implementation: spawns `oz agent run
-      --model <model_id> --prompt <built classifier prompt>`,
-      reads stdout, parses out the chosen worker id. The
-      classifier prompt is built from a small Jinja-style
-      template (or just `format!` — we don't need a templating
-      crate for this) that includes the workers + hints + the
-      user's transcript and asks for the worker id as the
-      first whitespace-delimited token on stdout.
+- [x] `OzCliBackend` implementation: spawns `oz agent run
+      --model <model_id> --prompt <built classifier prompt>`
+      with stdin null, stdout + stderr piped. Prompt rides
+      in argv as a single element so newlines / quotes round-
+      trip intact (no shell interpolation). The classifier
+      prompt is built from the same `default_classifier_prompt`
+      the HTTP backend uses, keeping behaviour aligned.
+      Stdout parses through `parse_worker_id`. Non-zero exit
+      becomes a backend error including a stderr snippet.
+      Timeout uses a watchdog thread mirroring `recorder.rs`'s
+      pattern: child is placed in its own process group via
+      `process_group(0)` and SIGTERM'd via `kill(-pgid, ...)`
+      so the real `oz`'s child model-runner doesn't survive
+      its parent and hang the pipe read. *(B-3, shipped this
+      commit.)*
 - [x] `OpenAiCompatBackend` implementation: HTTP POST to a
       configurable endpoint following the OpenAI Chat
       Completions wire protocol. Configuration fields:

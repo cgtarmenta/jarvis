@@ -32,8 +32,10 @@ use anyhow::Result;
 use crate::workers::{WorkerHandle, WorkerRegistry};
 
 pub mod openai_compat;
+pub mod oz_cli;
 
 pub use openai_compat::OpenAiCompatBackend;
+pub use oz_cli::OzCliBackend;
 
 /// A minimal snapshot of a worker for the classifier prompt. Only the
 /// fields the LLM actually needs to make a routing decision: the id
