@@ -16,6 +16,7 @@
 
 pub mod cascade;
 pub mod default;
+pub mod intent;
 
 use anyhow::Result;
 
@@ -24,6 +25,7 @@ use crate::workers::WorkerRegistry;
 
 pub use cascade::CascadeDispatcher;
 pub use default::DefaultWorkerDispatcher;
+pub use intent::{BuiltinIntentDispatcher, IntentMatcher};
 
 /// The dispatcher's decision for a single turn.
 ///

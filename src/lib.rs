@@ -10,6 +10,7 @@ pub mod cli;
 pub mod config;
 pub mod daemon;
 pub mod dispatcher;
+pub mod handlers;
 pub mod pipeline;
 pub mod recorder;
 pub mod session;
