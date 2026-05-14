@@ -43,7 +43,7 @@ anyhow = "1.0"
 thiserror = "1.0"
 
 # Looking up binaries on PATH for ``jarvis doctor``.
-which = "6.0"
+which = "8.0"
 
 # SIGINT/SIGTERM handling for the daemon.
 signal-hook = "0.3"
