@@ -17,6 +17,7 @@ pub mod session;
 pub mod setup;
 pub mod specs;
 pub mod stt;
+pub mod tasks;
 pub mod tts;
 pub mod wake;
 pub mod workers;

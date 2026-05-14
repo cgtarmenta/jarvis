@@ -1,15 +1,14 @@
 ---
-id:
+id: 0011
 title: Orchestrator E1 — Task registry foundation
-status: inbox
+status: active
 owner: unassigned
 created: 2026-05-14
 shipped:
 verifying:
 related:
-  - inbox/2026-05-13-generalist-orchestrator-that-spawns-spec.md
-  - inbox/2026-05-14-orchestrator-c-worker-manifests-and-auto.md
-  - inbox/2026-05-14-orchestrator-a-dispatcher-trait-and-buil.md
+id: 
+shipped: 
 ---
 
 # Orchestrator E1 — Task registry foundation
@@ -135,6 +134,8 @@ Out of scope for E1 (deferred to E2 or beyond):
 - Resumption: a cancelled task cannot be resumed.
 
 ## Journal
+
+- 2026-05-14: promoted to active.
 
 - 2026-05-14: opened. Blocks on hija C (`async_eligible` flag
   in the worker manifest). Independent of hijas A, B, D for
