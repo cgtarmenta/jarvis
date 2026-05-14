@@ -47,13 +47,16 @@ endpoint like Groq / Fireworks (best latency for the money).
 
 ## What
 
-- [ ] `LlmBackend` trait in a new `src/dispatcher/llm.rs` module.
+- [x] `LlmBackend` trait in a new `src/dispatcher/llm.rs` module.
       Method: `classify(&self, prompt: &str, workers:
-      &[WorkerInfo]) -> Result<DispatchDecision>` where
+      &[WorkerInfo]) -> Result<Option<String>>` where
       `WorkerInfo` is a thin struct of `{ id, dispatch_hint }`
-      derived from the `WorkerRegistry`. The backend returns a
-      `DispatchDecision` exactly like hija A's stage-1
-      dispatchers — same downstream code path.
+      derived from the `WorkerRegistry`. Backend returns the
+      chosen worker id (or `None` to decline); the cascade
+      adapter wraps that into a `DispatchDecision` after
+      validating the id against the live registry. *(B-1,
+      shipped ecb28fe; landed as a directory module
+      `src/dispatcher/llm/` once B-2 added the second file.)*
 - [ ] `OzCliBackend` implementation: spawns `oz agent run
       --model <model_id> --prompt <built classifier prompt>`,
       reads stdout, parses out the chosen worker id. The
@@ -62,16 +65,22 @@ endpoint like Groq / Fireworks (best latency for the money).
       crate for this) that includes the workers + hints + the
       user's transcript and asks for the worker id as the
       first whitespace-delimited token on stdout.
-- [ ] `OpenAiCompatBackend` implementation: HTTP POST to a
+- [x] `OpenAiCompatBackend` implementation: HTTP POST to a
       configurable endpoint following the OpenAI Chat
       Completions wire protocol. Configuration fields:
-      `endpoint` (URL), `model` (string), optional `api_key`
-      (secret), optional `headers` (string→string map for
-      custom auth / VPN routing), `timeout_secs` (default 5).
-      Request uses JSON mode if the endpoint supports it for
-      schema-constrained output. Reqwest is the HTTP client
-      (we already pull it transitively); add only if not
-      already in `Cargo.toml`.
+      `endpoint` (full URL — caller supplies path including
+      `/chat/completions`), `model` (string), optional
+      `api_key` sent as `Authorization: Bearer ...`, optional
+      `headers` map for custom auth / VPN routing,
+      `timeout_secs` (default 5s, per-call). HTTP client is
+      `ureq` (already a direct dep) rather than reqwest — the
+      spec mentioned the wrong crate by name. Sampling is
+      `temperature = 0`, `max_tokens = 32` so the same prompt
+      always produces the same answer (cache-friendly) and
+      replies are short. Response parser accepts both the
+      plain-string and array-of-parts content shapes so
+      multimodal-extended vLLM/Triton builds work out of
+      the box. *(B-2, shipped this commit.)*
 - [ ] Config schema in `config.toml`:
       ```
       [listener.fallback]

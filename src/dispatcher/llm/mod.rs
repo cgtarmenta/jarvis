@@ -6,10 +6,11 @@
 //! either a worker id (route the prompt there) or `None` (no clear
 //! pick — let stage 3 take over with the default worker).
 //!
-//! This file ships the trait, the [`WorkerInfo`] descriptor it consumes,
-//! and the default classifier prompt builder. Concrete backends
-//! ([`OpenAiCompatBackend`], [`OzCliBackend`]) land in subsequent
-//! slices, and the cascade integration that wraps a backend as a
+//! This module ships the trait, the [`WorkerInfo`] descriptor it
+//! consumes, the default classifier prompt builder, and one concrete
+//! backend per file in the `llm/` submodule directory
+//! ([`openai_compat::OpenAiCompatBackend`] in B-2, an `oz`-cli wrapper
+//! in B-3). The cascade integration that wraps a backend as a
 //! [`super::Dispatcher`] lands in B-4.
 //!
 //! The trait deliberately returns *just* the chosen worker id, not a
@@ -29,6 +30,10 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::workers::{WorkerHandle, WorkerRegistry};
+
+pub mod openai_compat;
+
+pub use openai_compat::OpenAiCompatBackend;
 
 /// A minimal snapshot of a worker for the classifier prompt. Only the
 /// fields the LLM actually needs to make a routing decision: the id
