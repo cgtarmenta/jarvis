@@ -1,15 +1,14 @@
 ---
-id:
+id: 0010
 title: Orchestrator A — Dispatcher trait and built-in handlers
-status: inbox
+status: active
 owner: unassigned
 created: 2026-05-14
 shipped:
 verifying:
 related:
-  - inbox/2026-05-13-generalist-orchestrator-that-spawns-spec.md
-  - inbox/2026-05-14-orchestrator-c-worker-manifests-and-auto.md
-  - inbox/2026-05-14-orchestrator-d-multi-worker-memory-schem.md
+id: 
+shipped: 
 ---
 
 # Orchestrator A — Dispatcher trait and built-in handlers
@@ -125,6 +124,8 @@ Out of scope:
   with a sprinkle of English). v1 stays Spanish-first.
 
 ## Journal
+
+- 2026-05-14: promoted to active.
 
 - 2026-05-14: opened. Blocks on hija C (workers must be
   declarable as a precondition) and hija D (memory schema

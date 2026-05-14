@@ -9,6 +9,7 @@ pub mod agents;
 pub mod cli;
 pub mod config;
 pub mod daemon;
+pub mod dispatcher;
 pub mod pipeline;
 pub mod recorder;
 pub mod session;
