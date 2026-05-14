@@ -133,6 +133,16 @@ enum Cmd {
         cmd: AgentCmd,
     },
 
+    /// Inspect the worker registry — every manifest under
+    /// `~/.config/jarvis/workers/` plus any built-in handlers, with
+    /// their status (active or disabled with reason). Spec 0008 ships
+    /// the registry; this surface exists so you can sanity-check it
+    /// without `RUST_LOG=jarvis=debug`.
+    Worker {
+        #[command(subcommand)]
+        cmd: WorkerCmd,
+    },
+
     /// Diagnostic: run the configured wake backend for N seconds with
     /// verbose logging (RMS readings, transcripts, match status). Use this
     /// to tune `[wake].vad_rms_threshold` and `[wake].phrases` without
@@ -150,6 +160,14 @@ enum Cmd {
         #[arg(long)]
         phrases: Option<String>,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum WorkerCmd {
+    /// Print every known worker (active + disabled) with their
+    /// metadata. Use this to verify a freshly-edited manifest loaded
+    /// correctly, or to see why one isn't being picked up.
+    List,
 }
 
 #[derive(Subcommand, Debug)]
@@ -271,6 +289,7 @@ pub fn run() -> Result<()> {
         Cmd::Session { cmd } => cmd_session(cmd),
         Cmd::Spec { cmd } => cmd_spec(cmd),
         Cmd::Agent { cmd } => cmd_agent(&cfg, cmd),
+        Cmd::Worker { cmd } => cmd_worker(cmd),
         Cmd::TestWake {
             seconds,
             threshold,
@@ -1063,4 +1082,189 @@ fn cmd_agent_claude(cfg: &JarvisConfig, cmd: AgentCmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn cmd_worker(cmd: WorkerCmd) -> Result<()> {
+    match cmd {
+        WorkerCmd::List => cmd_worker_list(),
+    }
+}
+
+fn cmd_worker_list() -> Result<()> {
+    // Ensure the workers directory exists (and the starter manifest)
+    // before listing, so a fresh install shows something meaningful
+    // instead of an empty registry.
+    let _ = config::ensure_workers_dir();
+    let dir = config::workers_dir()?;
+    let registry = crate::workers::WorkerRegistry::load_from_dir(&dir);
+    print!("{}", format_worker_list(&dir, &registry));
+    Ok(())
+}
+
+/// Build the text output of `jarvis worker list`. Pure function so it
+/// can be unit-tested against synthetic registries without touching
+/// the filesystem; the surrounding `cmd_worker_list` adds the I/O.
+fn format_worker_list(dir: &Path, registry: &crate::workers::WorkerRegistry) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    writeln!(out, "Workers directory: {}", dir.display()).unwrap();
+    writeln!(
+        out,
+        "Active: {}    Disabled: {}",
+        registry.active_workers().len(),
+        registry.disabled_workers().len()
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+
+    if registry.active_workers().is_empty() && registry.disabled_workers().is_empty() {
+        writeln!(
+            out,
+            "(no workers loaded — drop a manifest in {})",
+            dir.display()
+        )
+        .unwrap();
+        return out;
+    }
+
+    if !registry.active_workers().is_empty() {
+        writeln!(out, "ACTIVE").unwrap();
+        for w in registry.active_workers() {
+            writeln!(out, "  {}", w.id()).unwrap();
+            if let Some(desc) = w.description() {
+                writeln!(out, "    {desc}").unwrap();
+            }
+            let source = match w.source_path() {
+                Some(p) => p.display().to_string(),
+                None => "<built-in>".to_string(),
+            };
+            writeln!(out, "    source: {source}").unwrap();
+            writeln!(
+                out,
+                "    stateful={}  async={}  tty={}",
+                w.stateful(),
+                w.async_eligible(),
+                w.tty()
+            )
+            .unwrap();
+            if let Some(hint) = w.dispatch_hint() {
+                writeln!(out, "    hint: {hint}").unwrap();
+            }
+        }
+        writeln!(out).unwrap();
+    }
+
+    if !registry.disabled_workers().is_empty() {
+        writeln!(out, "DISABLED").unwrap();
+        for d in registry.disabled_workers() {
+            let label = d.id.as_deref().unwrap_or("<unknown id>");
+            writeln!(out, "  {label}").unwrap();
+            writeln!(out, "    source: {}", d.source.display()).unwrap();
+            writeln!(out, "    reason: {}", d.reason).unwrap();
+        }
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use crate::workers::{WorkerHandle, WorkerInvocation, WorkerRegistry, WorkerResponse};
+
+    struct StubWorker {
+        id: &'static str,
+        desc: Option<&'static str>,
+        stateful: bool,
+    }
+    impl WorkerHandle for StubWorker {
+        fn id(&self) -> &str {
+            self.id
+        }
+        fn description(&self) -> Option<&str> {
+            self.desc
+        }
+        fn stateful(&self) -> bool {
+            self.stateful
+        }
+        fn invoke(&self, _: &WorkerInvocation<'_>) -> Result<WorkerResponse> {
+            unreachable!("not invoked in format tests")
+        }
+    }
+
+    /// `format_worker_list` produces the expected text shape for an
+    /// empty registry. Surfaces the "drop a manifest in" hint so a
+    /// fresh user sees what to do.
+    #[test]
+    fn format_empty_registry() {
+        let registry = WorkerRegistry::default();
+        let text = format_worker_list(Path::new("/some/dir"), &registry);
+        assert!(text.contains("Workers directory: /some/dir"));
+        assert!(text.contains("Active: 0"));
+        assert!(text.contains("Disabled: 0"));
+        assert!(text.contains("no workers loaded"));
+    }
+
+    /// `format_worker_list` shows id / description / source for an
+    /// active built-in handler. Source resolves to `<built-in>` when
+    /// the worker doesn't expose a path.
+    #[test]
+    fn format_built_in_active_worker() {
+        let mut registry = WorkerRegistry::default();
+        registry.register_builtin(Arc::new(StubWorker {
+            id: "time",
+            desc: Some("returns the current time"),
+            stateful: false,
+        }));
+        let text = format_worker_list(Path::new("/some/dir"), &registry);
+        assert!(text.contains("ACTIVE"));
+        assert!(text.contains("  time"));
+        assert!(text.contains("    returns the current time"));
+        assert!(text.contains("source: <built-in>"));
+        assert!(
+            text.contains("stateful=false"),
+            "expected stateful=false in output:\n{text}"
+        );
+    }
+
+    /// Both a manifest-loaded worker and a built-in show up together,
+    /// with proper section ordering: active first, then disabled. Uses
+    /// a real on-disk manifest to exercise the full path including
+    /// source_path display.
+    #[test]
+    fn format_mixed_actives_and_disabled() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("good.toml"),
+            "id = \"good\"\ndescription = \"a working manifest\"\ncommand = [\"sh\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("broken.toml"),
+            "id = \"broken\"\ncommand = [\"this-definitely-does-not-exist-99999\"]\n",
+        )
+        .unwrap();
+        let registry = WorkerRegistry::load_from_dir(tmp.path());
+        let text = format_worker_list(tmp.path(), &registry);
+
+        // Sections present in expected order.
+        let active_pos = text.find("ACTIVE").expect("ACTIVE section");
+        let disabled_pos = text.find("DISABLED").expect("DISABLED section");
+        assert!(
+            active_pos < disabled_pos,
+            "ACTIVE should come before DISABLED:\n{text}"
+        );
+
+        // Active worker details.
+        assert!(text.contains("  good"));
+        assert!(text.contains("    a working manifest"));
+        assert!(text.contains("good.toml"));
+
+        // Disabled worker details.
+        assert!(text.contains("  broken"));
+        assert!(text.contains("not found on PATH"));
+    }
 }

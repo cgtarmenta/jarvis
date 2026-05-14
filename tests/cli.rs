@@ -55,3 +55,24 @@ fn doctor_runs_without_crashing() {
         .success()
         .stdout(contains("Jarvis doctor"));
 }
+
+/// Spec 0008 (orchestrator C-5): `jarvis worker list` prints the
+/// registry contents. Against a fresh temp config, this exercises:
+/// (1) `ensure_workers_dir()` auto-installs the bundled starter
+///     `claude.toml`; (2) the registry loads it; (3) the formatted
+/// output names it under ACTIVE.
+///
+/// If `claude` isn't on PATH on the CI host, the manifest will be
+/// disabled — the assertion looks for `claude` to appear in either
+/// section, not strictly under ACTIVE, so the test stays portable.
+#[test]
+#[serial]
+fn worker_list_shows_bundled_claude_manifest() {
+    let tmp = TempDir::new().unwrap();
+    redirect_xdg(jarvis().args(["worker", "list"]), &tmp)
+        .assert()
+        .success()
+        .stdout(contains("Workers directory:"))
+        .stdout(contains("claude.toml"))
+        .stdout(contains("claude"));
+}
