@@ -115,9 +115,9 @@ impl ManifestWorker {
     /// add construction sites elsewhere.
     pub fn new(manifest: WorkerManifest, source: PathBuf) -> Result<Self> {
         let capture_regex = match &manifest.session_id_capture {
-            Some(cap) => Some(
-                Regex::new(&cap.regex).context("compiling session_id_capture.regex")?,
-            ),
+            Some(cap) => {
+                Some(Regex::new(&cap.regex).context("compiling session_id_capture.regex")?)
+            }
             None => None,
         };
         Ok(Self {
@@ -337,10 +337,12 @@ impl ManifestWorker {
         }
         builder.env("JARVIS_VOICE_TURN", "1");
 
-        let mut child = pair
-            .slave
-            .spawn_command(builder)
-            .with_context(|| format!("spawning worker {:?} ({}) via pty", self.manifest.id, argv[0]))?;
+        let mut child = pair.slave.spawn_command(builder).with_context(|| {
+            format!(
+                "spawning worker {:?} ({}) via pty",
+                self.manifest.id, argv[0]
+            )
+        })?;
         // Drop the slave so its file descriptors close on our side;
         // the child still holds its half, which keeps the pty alive
         // until the child exits.
@@ -687,11 +689,7 @@ mod tests {
             // tty(1) tests stdin; cat then echoes stdin through. The
             // PTY makes both halves work; plain pipes would have tty
             // fail with "not a tty" on stderr.
-            command: vec![
-                "sh".to_string(),
-                "-c".to_string(),
-                "tty; cat".to_string(),
-            ],
+            command: vec!["sh".to_string(), "-c".to_string(), "tty; cat".to_string()],
             initial_command: None,
             stateful: false,
             session_id_capture: None,

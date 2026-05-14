@@ -1401,13 +1401,18 @@ fn cmd_task_cancel(dir: &Path, id_prefix: &str) -> Result<()> {
 
     let mut updated = task.clone();
     updated.status = crate::tasks::TaskStatus::Cancelled;
-    updated.save(dir)
+    updated
+        .save(dir)
         .with_context(|| format!("persisting Cancelled state for task {}", updated.id))?;
 
     #[cfg(unix)]
     let signal_result = unsafe {
         let r = libc::kill(pid as libc::pid_t, libc::SIGTERM);
-        if r == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+        if r == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
     };
     #[cfg(not(unix))]
     let signal_result: std::io::Result<()> = Err(std::io::Error::other("non-unix cancel"));
@@ -1436,8 +1441,8 @@ fn format_task_list(
     registry: &crate::tasks::TaskRegistry,
     include_terminal: bool,
 ) -> String {
-    use std::fmt::Write as _;
     use crate::tasks::TaskStatus;
+    use std::fmt::Write as _;
     let mut out = String::new();
     writeln!(out, "Tasks directory: {}", dir.display()).unwrap();
     let total = registry.all().len();

@@ -77,16 +77,11 @@ impl WorkerHandle for TaskShowHandler {
         let dir = TaskRegistry::default_dir()?;
         let registry = TaskRegistry::load_from_dir(&dir);
         let text = match resolve_task_reference(ctx.prompt, &registry) {
-            ResolveResult::None => {
-                "No encontré ninguna tarea que coincida con eso. Si ya pasó \
+            ResolveResult::None => "No encontré ninguna tarea que coincida con eso. Si ya pasó \
                  hace tiempo, puede que se haya purgado del registro."
-                    .to_string()
-            }
+                .to_string(),
             ResolveResult::Ambiguous(matches) => {
-                let workers: Vec<&str> = matches
-                    .iter()
-                    .map(|t| t.worker_id.as_str())
-                    .collect();
+                let workers: Vec<&str> = matches.iter().map(|t| t.worker_id.as_str()).collect();
                 let mut unique = workers.clone();
                 unique.sort();
                 unique.dedup();
@@ -127,14 +122,10 @@ fn describe_task(task: &crate::tasks::Task) -> String {
             )
         }
         TaskStatus::Completed => match &task.summary {
-            Some(s) if !s.is_empty() => format!(
-                "{} terminó. Esto fue lo que dijo: {}",
-                task.worker_id, s
-            ),
-            _ => format!(
-                "{} terminó sin producir resultado visible.",
-                task.worker_id
-            ),
+            Some(s) if !s.is_empty() => {
+                format!("{} terminó. Esto fue lo que dijo: {}", task.worker_id, s)
+            }
+            _ => format!("{} terminó sin producir resultado visible.", task.worker_id),
         },
         TaskStatus::Failed => {
             let code = task

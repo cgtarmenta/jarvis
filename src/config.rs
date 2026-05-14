@@ -87,8 +87,7 @@ pub fn workers_dir() -> Result<PathBuf> {
 /// `claude.toml` keep their version on subsequent starts.
 pub fn ensure_workers_dir() -> Result<PathBuf> {
     let dir = workers_dir()?;
-    fs::create_dir_all(&dir)
-        .with_context(|| format!("creating workers dir: {}", dir.display()))?;
+    fs::create_dir_all(&dir).with_context(|| format!("creating workers dir: {}", dir.display()))?;
     let starter = dir.join("claude.toml");
     if !starter.exists() {
         fs::write(&starter, STARTER_CLAUDE_MANIFEST)

@@ -21,7 +21,9 @@ use super::claude_attach::{self, Attachment};
 use super::{Agent, opt_bool, opt_string};
 use crate::config;
 use crate::session::Turn;
-use crate::workers::{ManifestWorker, WorkerHandle, WorkerInvocation, WorkerManifest, WorkerRegistry};
+use crate::workers::{
+    ManifestWorker, WorkerHandle, WorkerInvocation, WorkerManifest, WorkerRegistry,
+};
 
 /// `[agent].options` keys that have been migrated into the worker
 /// manifest. If a user still has them set in `config.toml` we log a

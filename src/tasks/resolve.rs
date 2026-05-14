@@ -256,12 +256,7 @@ mod tests {
                 "analiza el syslog y resume los errores",
                 100,
             ),
-            record(
-                "t-002",
-                "claude",
-                "refactoriza el módulo de specs",
-                200,
-            ),
+            record("t-002", "claude", "refactoriza el módulo de specs", 200),
         ]);
         // "el análisis del log" — none of the words is a
         // direct substring of the intent, but "log" → matches
@@ -282,12 +277,7 @@ mod tests {
     /// Nothing matches → None.
     #[test]
     fn no_match_yields_none() {
-        let reg = registry_with(vec![record(
-            "t-001",
-            "gemini",
-            "analyze syslog",
-            100,
-        )]);
+        let reg = registry_with(vec![record("t-001", "gemini", "analyze syslog", 100)]);
         assert!(matches!(
             resolve_task_reference("tarea de cocina", &reg),
             ResolveResult::None

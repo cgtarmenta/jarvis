@@ -296,14 +296,8 @@ mod tests {
         // Tiny sleep so the nanosecond tail differs.
         std::thread::sleep(std::time::Duration::from_nanos(1000));
         let id_b = task_id(same_sec);
-        assert!(
-            id_a.starts_with("t-1715700000-"),
-            "got: {id_a}"
-        );
-        assert!(
-            id_b.starts_with("t-1715700000-"),
-            "got: {id_b}"
-        );
+        assert!(id_a.starts_with("t-1715700000-"), "got: {id_a}");
+        assert!(id_b.starts_with("t-1715700000-"), "got: {id_b}");
         assert_ne!(id_a, id_b, "same-second ids must differ in the hex tail");
     }
 }

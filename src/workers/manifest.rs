@@ -327,7 +327,11 @@ mod tests {
         let m = WorkerManifest {
             id: "claude".to_string(),
             description: None,
-            command: vec!["claude".to_string(), "--resume".to_string(), "{session_id}".to_string()],
+            command: vec![
+                "claude".to_string(),
+                "--resume".to_string(),
+                "{session_id}".to_string(),
+            ],
             initial_command: Some(vec!["claude".to_string(), "--print".to_string()]),
             stateful: true,
             session_id_capture: None,
@@ -346,7 +350,11 @@ mod tests {
         // Stateful + for_initial=false → command (with substitution).
         assert_eq!(
             m.build_command(&v, false),
-            vec!["claude".to_string(), "--resume".to_string(), "abc-123".to_string()]
+            vec![
+                "claude".to_string(),
+                "--resume".to_string(),
+                "abc-123".to_string()
+            ]
         );
 
         // Stateless: for_initial flag is ignored, command always wins.
@@ -354,7 +362,11 @@ mod tests {
         stateless.stateful = false;
         assert_eq!(
             stateless.build_command(&v, true),
-            vec!["claude".to_string(), "--resume".to_string(), "abc-123".to_string()]
+            vec![
+                "claude".to_string(),
+                "--resume".to_string(),
+                "abc-123".to_string()
+            ]
         );
 
         // Stateful but no initial_command: fall back to command.
@@ -362,7 +374,11 @@ mod tests {
         no_init.initial_command = None;
         assert_eq!(
             no_init.build_command(&v, true),
-            vec!["claude".to_string(), "--resume".to_string(), "abc-123".to_string()]
+            vec![
+                "claude".to_string(),
+                "--resume".to_string(),
+                "abc-123".to_string()
+            ]
         );
     }
 

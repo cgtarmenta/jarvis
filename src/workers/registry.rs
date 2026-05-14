@@ -193,7 +193,8 @@ impl WorkerRegistry {
             }
         };
 
-        self.by_id.insert(worker.id().to_string(), self.active.len());
+        self.by_id
+            .insert(worker.id().to_string(), self.active.len());
         self.active.push(Arc::new(worker));
     }
 
@@ -264,8 +265,7 @@ fn is_executable_present(name: &str) -> bool {
 /// `load_from_dir(default_dir()?)`, with the missing-dir case mapped to
 /// an empty registry.
 pub fn load_default() -> Result<WorkerRegistry> {
-    let dir = WorkerRegistry::default_dir()
-        .context("resolving default workers directory")?;
+    let dir = WorkerRegistry::default_dir().context("resolving default workers directory")?;
     Ok(WorkerRegistry::load_from_dir(&dir))
 }
 
@@ -515,10 +515,7 @@ mod tests {
             .expect("built-in disabled");
         assert!(disabled.reason.contains("shadowed"));
         assert!(
-            disabled
-                .source
-                .to_string_lossy()
-                .contains("built-in"),
+            disabled.source.to_string_lossy().contains("built-in"),
             "got source: {}",
             disabled.source.display()
         );
@@ -530,7 +527,11 @@ mod tests {
     fn non_toml_files_are_ignored() {
         let tmp = TempDir::new().unwrap();
         write(tmp.path(), "README.md", "not a manifest");
-        write(tmp.path(), "good.toml.bak", "id = \"backup\"\ncommand = [\"sh\"]\n");
+        write(
+            tmp.path(),
+            "good.toml.bak",
+            "id = \"backup\"\ncommand = [\"sh\"]\n",
+        );
         write(
             tmp.path(),
             "good.toml",

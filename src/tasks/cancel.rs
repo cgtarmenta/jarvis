@@ -36,12 +36,9 @@ pub fn cancel_task(task: &Task, base_dir: &Path) -> Result<Task> {
             task.status
         ));
     }
-    let pid = task.pid.ok_or_else(|| {
-        anyhow!(
-            "task {} is Running but has no recorded pid",
-            task.id
-        )
-    })?;
+    let pid = task
+        .pid
+        .ok_or_else(|| anyhow!("task {} is Running but has no recorded pid", task.id))?;
 
     let mut updated = task.clone();
     updated.status = TaskStatus::Cancelled;

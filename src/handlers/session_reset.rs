@@ -147,7 +147,10 @@ mod tests {
     fn substrings_do_not_match() {
         let h = handler();
         let session = Session::new();
-        assert!(h.recognize("puedes olvidar la última cosa", &session).is_none());
+        assert!(
+            h.recognize("puedes olvidar la última cosa", &session)
+                .is_none()
+        );
         assert!(h.recognize("voy a hacer reset luego", &session).is_none());
         assert!(h.recognize("no olvides comprar pan", &session).is_none());
     }

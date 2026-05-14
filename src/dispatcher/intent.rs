@@ -114,7 +114,9 @@ mod tests {
             self.id
         }
         fn recognize(&self, prompt: &str, _: &Session) -> Option<String> {
-            prompt.strip_prefix(self.prefix).map(|s| s.trim().to_string())
+            prompt
+                .strip_prefix(self.prefix)
+                .map(|s| s.trim().to_string())
         }
     }
 
@@ -172,11 +174,10 @@ mod tests {
     /// dispatch decision.
     #[test]
     fn session_id_flows_through_when_recorded() {
-        let dispatcher =
-            BuiltinIntentDispatcher::new().push(Arc::new(StubMatcher {
-                id: "stateful",
-                prefix: "go ",
-            }));
+        let dispatcher = BuiltinIntentDispatcher::new().push(Arc::new(StubMatcher {
+            id: "stateful",
+            prefix: "go ",
+        }));
 
         let mut session = Session::new();
         session.set_active_worker_session("stateful", Some("uuid-prior".into()));

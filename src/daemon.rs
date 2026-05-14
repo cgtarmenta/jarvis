@@ -45,7 +45,11 @@ pub fn run(cfg: JarvisConfig) -> Result<()> {
             );
             info!(
                 active = task_reg.active().count(),
-                terminal = task_reg.all().iter().filter(|t| t.status.is_terminal()).count(),
+                terminal = task_reg
+                    .all()
+                    .iter()
+                    .filter(|t| t.status.is_terminal())
+                    .count(),
                 pruned,
                 "task registry initialised"
             );

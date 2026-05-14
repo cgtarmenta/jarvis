@@ -231,18 +231,10 @@ pub fn run_turn(cfg: &JarvisConfig, opts: TurnOptions) -> Result<Option<String>>
                 &sess.id,
                 &prompt,
             )
-            .with_context(|| {
-                format!(
-                    "spawning async task for worker {:?}",
-                    decision.worker_id
-                )
-            })?;
+            .with_context(|| format!("spawning async task for worker {:?}", decision.worker_id))?;
             info!(task_id = %task.id, "async task spawned for trigger phrase");
 
-            let ack = format!(
-                "Listo, te aviso cuando {} termine.",
-                decision.worker_id
-            );
+            let ack = format!("Listo, te aviso cuando {} termine.", decision.worker_id);
 
             // Persist a synthetic turn pair: the user's prompt and
             // Jarvis's "te aviso" ack. The actual worker reply

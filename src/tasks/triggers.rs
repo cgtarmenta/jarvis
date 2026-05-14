@@ -104,10 +104,7 @@ mod tests {
             "tell me when you're done",
             "put this in the background",
         ] {
-            assert!(
-                is_async_trigger(phrase),
-                "should trigger: {phrase:?}"
-            );
+            assert!(is_async_trigger(phrase), "should trigger: {phrase:?}");
         }
     }
 
@@ -126,10 +123,7 @@ mod tests {
             // Has "cuando" but not part of any trigger phrase.
             "qué hago cuando llueve",
         ] {
-            assert!(
-                !is_async_trigger(phrase),
-                "should NOT trigger: {phrase:?}"
-            );
+            assert!(!is_async_trigger(phrase), "should NOT trigger: {phrase:?}");
         }
     }
 

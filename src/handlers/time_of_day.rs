@@ -114,9 +114,7 @@ fn timezone_for_city(city: &str) -> Option<Tz> {
     let c = city.trim();
     let tz_name = match c {
         // Iberian
-        "madrid" | "barcelona" | "valencia" | "sevilla" | "españa" | "espana" => {
-            "Europe/Madrid"
-        }
+        "madrid" | "barcelona" | "valencia" | "sevilla" | "españa" | "espana" => "Europe/Madrid",
         "lisboa" | "lisbon" | "portugal" => "Europe/Lisbon",
         // Western Europe
         "londres" | "london" | "uk" => "Europe/London",

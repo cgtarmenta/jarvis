@@ -8,7 +8,7 @@
 //! `evalexpr`.
 
 use anyhow::Result;
-use evalexpr::{eval, Value};
+use evalexpr::{Value, eval};
 
 use crate::dispatcher::IntentMatcher;
 use crate::session::Session;
@@ -236,7 +236,10 @@ mod tests {
     fn trigger_without_numbers_declines() {
         let h = CalcHandler;
         let session = Session::new();
-        assert!(h.recognize("calculate the distance to the moon", &session).is_none());
+        assert!(
+            h.recognize("calculate the distance to the moon", &session)
+                .is_none()
+        );
         assert!(h.recognize("cuanto es la vida", &session).is_none());
     }
 
@@ -281,10 +284,7 @@ mod tests {
     #[test]
     fn translate_english_words() {
         assert_eq!(translate_to_expression("seven times six"), "7 * 6");
-        assert_eq!(
-            translate_to_expression("ten divided by four"),
-            "10.0 / 4.0"
-        );
+        assert_eq!(translate_to_expression("ten divided by four"), "10.0 / 4.0");
     }
 
     /// Division producing a non-integer renders with trimmed

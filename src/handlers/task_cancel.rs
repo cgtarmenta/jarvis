@@ -73,10 +73,7 @@ impl WorkerHandle for TaskCancelHandler {
                 "No encontré ninguna tarea corriendo que coincida con eso.".to_string()
             }
             ResolveResult::Ambiguous(matches) => {
-                let workers: Vec<&str> = matches
-                    .iter()
-                    .map(|t| t.worker_id.as_str())
-                    .collect();
+                let workers: Vec<&str> = matches.iter().map(|t| t.worker_id.as_str()).collect();
                 let mut unique = workers.clone();
                 unique.sort();
                 unique.dedup();
@@ -94,10 +91,7 @@ impl WorkerHandle for TaskCancelHandler {
                 }
             }
             ResolveResult::Unique(task) => match cancel_task(&task, &dir) {
-                Ok(cancelled) => format!(
-                    "Listo, cancelé la tarea de {}.",
-                    cancelled.worker_id
-                ),
+                Ok(cancelled) => format!("Listo, cancelé la tarea de {}.", cancelled.worker_id),
                 Err(e) => {
                     // `cancel_task` already produces a
                     // human-readable error ("not running", "no

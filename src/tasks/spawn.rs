@@ -96,9 +96,8 @@ pub fn spawn_async_task(
         .with_context(|| format!("spawning async worker {:?}", worker.id()))?;
     let pid = child.id();
     task.pid = Some(pid);
-    task.save(base_dir).with_context(|| {
-        format!("persisting initial record for task {}", task.id)
-    })?;
+    task.save(base_dir)
+        .with_context(|| format!("persisting initial record for task {}", task.id))?;
 
     info!(
         task_id = %task.id,
@@ -281,7 +280,8 @@ mod tests {
     #[test]
     fn rejects_workers_without_async_eligible() {
         let tmp = TempDir::new().unwrap();
-        let worker = ManifestWorker::new(sync_manifest("sync"), PathBuf::from("test.toml")).unwrap();
+        let worker =
+            ManifestWorker::new(sync_manifest("sync"), PathBuf::from("test.toml")).unwrap();
         let result = spawn_async_task(
             &worker,
             &WorkerInvocation {
