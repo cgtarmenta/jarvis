@@ -756,9 +756,26 @@ fn cmd_session(cmd: SessionCmd) -> Result<()> {
             let sess = session::load_or_new(0)?;
             println!("Session: {}", sess.id);
             println!("  path:          {}", p.display());
+            println!("  schema:        v{}", sess.session_schema_version);
             println!("  started_at:    {}", sess.started_at);
             println!("  last_activity: {}", sess.last_activity);
             println!("  turns:         {}", sess.turns.len());
+            if sess.active_workers.is_empty() {
+                println!("  active_workers: (none)");
+            } else {
+                println!("  active_workers:");
+                // Stable ordering so consecutive invocations don't
+                // produce diff noise.
+                let mut entries: Vec<_> = sess.active_workers.iter().collect();
+                entries.sort_by(|a, b| a.0.cmp(b.0));
+                for (worker_id, session_id) in entries {
+                    let val = match session_id {
+                        Some(s) => s.as_str(),
+                        None => "(stateless)",
+                    };
+                    println!("    {worker_id:<12} → {val}");
+                }
+            }
             if !sess.turns.is_empty() {
                 let tail = sess.turns.iter().rev().take(6).collect::<Vec<_>>();
                 println!();
@@ -770,7 +787,17 @@ fn cmd_session(cmd: SessionCmd) -> Result<()> {
                     } else {
                         ""
                     };
-                    println!("  {:<10} {}{}", format!("[{:?}]", t.role), preview, suffix);
+                    // Show `dispatched_to` next to the role so users
+                    // can see at a glance which worker handled each
+                    // turn. For backward-compat v1 turns this reads
+                    // as `[User → claude]` thanks to the migration
+                    // default.
+                    println!(
+                        "  {:<25} {}{}",
+                        format!("[{:?} → {}]", t.role, t.dispatched_to),
+                        preview,
+                        suffix
+                    );
                 }
             }
         }

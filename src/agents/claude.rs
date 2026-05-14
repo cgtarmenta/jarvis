@@ -116,6 +116,17 @@ impl Agent for ClaudeAgent {
         "claude"
     }
 
+    /// The Claude session UUID Jarvis is currently attached to (via
+    /// `claude_attach::resolve`). The pipeline reads this *before*
+    /// invoking `respond` so the resulting turn record carries
+    /// `worker_session_id = Some(uuid)` and the session's
+    /// `active_workers["claude"]` map slot gets populated.
+    /// Returns `None` when there's no active attachment (the
+    /// "stateless" Claude path).
+    fn current_session_id(&self) -> Option<String> {
+        self.current_attachment().to_uuid()
+    }
+
     fn respond(&self, prompt: &str, history: &[Turn]) -> Result<String> {
         // Compose history into the prompt: claude --print is stateless
         // per invocation, so we embed prior turns as labelled "User:" /

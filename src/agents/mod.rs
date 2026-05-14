@@ -34,6 +34,21 @@ pub trait Agent {
     /// the prompt. An empty `history` slice means "first turn / no
     /// continuity available" — agents must handle that case gracefully.
     fn respond(&self, prompt: &str, history: &[Turn]) -> Result<String>;
+
+    /// The agent's currently-active worker-side session id, if it has
+    /// one. Stateful agents that resume an external session
+    /// (`claude --print --resume <uuid>`) return the uuid; stateless
+    /// agents (the HTTP-based OpenAI / Gemini wrappers) return `None`.
+    ///
+    /// Spec 0009 (orchestrator D): the pipeline reads this *before*
+    /// invoking the agent and writes it into the turn's
+    /// `worker_session_id` plus the session's `active_workers` map.
+    /// Default `None` keeps existing agents working without changes
+    /// — they don't lose behaviour, just don't surface a session id
+    /// to the new memory schema until they choose to.
+    fn current_session_id(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Build the configured agent from `[agent]` block.
@@ -104,6 +119,28 @@ pub(crate) fn opt_string_vec(opts: &toml::Table, key: &str) -> Result<Vec<String
             })
             .collect(),
         Some(_) => Err(anyhow!("agent option {key:?} must be an array of strings")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Spec 0009 (orchestrator D): the `Agent` trait's default
+    /// `current_session_id` returns `None`. Stateless agents
+    /// (HTTP-based OpenAI / Gemini wrappers, the `shell` agent)
+    /// inherit this default and don't have to implement the method,
+    /// so the trait stays one-method-wide for them while
+    /// `ClaudeAgent` overrides with a real session id.
+    #[test]
+    fn agent_default_current_session_id_is_none() {
+        let mut opts = toml::Table::new();
+        opts.insert(
+            "command".into(),
+            toml::Value::Array(vec![toml::Value::String("/bin/true".into())]),
+        );
+        let shell = ShellAgent::from_options(opts).expect("shell agent constructs");
+        assert!(shell.current_session_id().is_none());
     }
 }
 

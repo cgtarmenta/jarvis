@@ -188,17 +188,43 @@ pub fn run_turn(cfg: &JarvisConfig, opts: TurnOptions) -> Result<Option<String>>
             "session loaded"
         );
 
+        // Spec 0009 (orchestrator D): capture the worker's current
+        // session id *before* the call so the turn record reflects
+        // what was actually resumed. Stateful agents (Claude with
+        // its attach UUID) return Some; stateless agents return None.
+        let worker_session_id = agent.current_session_id();
+        let worker_id = agent.name().to_string();
+
         let reply = agent
             .respond(&prompt, &history)
             .with_context(|| format!("agent {} failed", agent.name()))?;
         info!(reply = %reply, "agent replied");
 
-        // Persist the turn pair. We save *after* the agent call so a
-        // failure in the agent path doesn't pollute the session with an
-        // unanswered user turn.
+        // Persist the turn pair with full dispatch metadata. We save
+        // *after* the agent call so a failure in the agent path
+        // doesn't pollute the session with an unanswered user turn.
         if cfg.session.enabled {
-            sess.add_turn(Role::User, prompt.clone());
-            sess.add_turn(Role::Assistant, reply.clone());
+            sess.add_turn_for_worker(
+                Role::User,
+                prompt.clone(),
+                worker_id.clone(),
+                worker_session_id.clone(),
+            );
+            sess.add_turn_for_worker(
+                Role::Assistant,
+                reply.clone(),
+                worker_id.clone(),
+                worker_session_id.clone(),
+            );
+            // Record this worker's most recently-known session id in
+            // the active_workers map. For Claude this is the attach
+            // UUID; for stateless agents it's `None`. Spec D's
+            // contract: the map is the dispatcher's per-thread
+            // "who's holding which session" registry. Hija A will
+            // extend this with session-id-capture for newly-spawned
+            // workers; today it's just whatever the agent surfaced
+            // pre-invocation, which captures the resume case.
+            sess.set_active_worker_session(worker_id, worker_session_id);
             sess.truncate_to(cfg.session.max_turns);
             if let Err(e) = session::save(&sess) {
                 warn!(error = %e, "failed to persist session — continuing");
