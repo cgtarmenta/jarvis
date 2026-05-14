@@ -230,13 +230,36 @@ impl ManifestWorker {
             .with_context(|| format!("spawning worker {:?} ({})", self.manifest.id, argv[0]))?;
 
         if !prompt_in_argv {
-            child
+            let stdin = child
                 .stdin
                 .as_mut()
-                .ok_or_else(|| anyhow!("worker {:?} stdin unavailable", self.manifest.id))?
-                .write_all(ctx.prompt.as_bytes())
-                .with_context(|| format!("writing prompt to worker {:?} stdin", self.manifest.id))?;
-            // Closing stdin signals EOF so the worker doesn't wait forever.
+                .ok_or_else(|| anyhow!("worker {:?} stdin unavailable", self.manifest.id))?;
+            match stdin.write_all(ctx.prompt.as_bytes()) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+                    // Worker exited before reading stdin — fine. This
+                    // happens for stateless handlers whose command
+                    // produces output without needing input (e.g. a
+                    // hypothetical `time` handler that just prints the
+                    // current clock), and was also showing up in CI
+                    // as a flake against the `sh -c 'printf ...'`
+                    // fixture used by the env-propagation test. The
+                    // worker's output is still captured by
+                    // `wait_with_output` below.
+                    tracing::debug!(
+                        worker = %self.manifest.id,
+                        "worker exited before consuming stdin; continuing"
+                    );
+                }
+                Err(e) => {
+                    return Err(anyhow::Error::new(e).context(format!(
+                        "writing prompt to worker {:?} stdin",
+                        self.manifest.id
+                    )));
+                }
+            }
+            // Closing stdin signals EOF so the worker doesn't wait
+            // forever — safe even after a broken-pipe write.
             drop(child.stdin.take());
         }
 

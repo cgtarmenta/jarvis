@@ -1,14 +1,14 @@
 ---
-id:
+id: 0009
 title: Orchestrator D — Multi-worker memory schema
-status: inbox
+status: active
 owner: unassigned
 created: 2026-05-14
 shipped:
 verifying:
 related:
-  - inbox/2026-05-13-generalist-orchestrator-that-spawns-spec.md
-  - inbox/2026-05-14-orchestrator-c-worker-manifests-and-auto.md
+id: 
+shipped: 
 ---
 
 # Orchestrator D — Multi-worker memory schema
@@ -117,6 +117,8 @@ Out of scope:
   the whole thread.
 
 ## Journal
+
+- 2026-05-14: promoted to active.
 
 - 2026-05-14: opened. Can land in parallel with hija C — both
   are schema/architecture prep with no behavior change. Hija A
