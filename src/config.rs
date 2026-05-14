@@ -37,6 +37,13 @@ pub const CURRENT_CONFIG_VERSION: u32 = 2;
 /// always self-sufficient even without /usr/share.
 pub const EXAMPLE_CONFIG: &str = include_str!("../config/config.example.toml");
 
+/// Bundled starter manifest for the `claude` worker. Dropped into
+/// `~/.config/jarvis/workers/claude.toml` by [`ensure_workers_dir`] on
+/// first run so the registry has a working default without forcing the
+/// user through `jarvis setup` again. See spec 0008 (orchestrator C)
+/// for context.
+pub const STARTER_CLAUDE_MANIFEST: &str = include_str!("../config/workers/claude.toml");
+
 fn project_dirs() -> Result<ProjectDirs> {
     ProjectDirs::from(QUALIFIER, ORG, APP_NAME)
         .ok_or_else(|| anyhow!("could not resolve user config directory"))
@@ -56,6 +63,38 @@ pub fn cache_dir() -> Result<PathBuf> {
     let p = project_dirs()?.cache_dir().to_path_buf();
     fs::create_dir_all(&p).with_context(|| format!("creating cache dir: {}", p.display()))?;
     Ok(p)
+}
+
+/// Path to the workers manifest directory:
+/// `~/.config/jarvis/workers/` on Linux/BSD, the platform equivalent on
+/// macOS. Does not create the directory — see [`ensure_workers_dir`] for
+/// that. Spec 0008 (orchestrator C) makes this the single autodiscovery
+/// path for worker manifests.
+pub fn workers_dir() -> Result<PathBuf> {
+    let cfg = config_path()?;
+    let parent = cfg
+        .parent()
+        .ok_or_else(|| anyhow!("config path has no parent: {}", cfg.display()))?;
+    Ok(parent.join("workers"))
+}
+
+/// Ensure `workers_dir()` exists and contains the starter `claude.toml`
+/// (dropped from [`STARTER_CLAUDE_MANIFEST`] on first run). Returns the
+/// directory path either way.
+///
+/// Existing files are never overwritten — this is a fresh-install
+/// helper, not a migration. Users who delete or edit their
+/// `claude.toml` keep their version on subsequent starts.
+pub fn ensure_workers_dir() -> Result<PathBuf> {
+    let dir = workers_dir()?;
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("creating workers dir: {}", dir.display()))?;
+    let starter = dir.join("claude.toml");
+    if !starter.exists() {
+        fs::write(&starter, STARTER_CLAUDE_MANIFEST)
+            .with_context(|| format!("writing starter manifest: {}", starter.display()))?;
+    }
+    Ok(dir)
 }
 
 /// Ensure the config file exists at `config_path()` and return that path.

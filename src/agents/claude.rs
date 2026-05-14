@@ -1,68 +1,110 @@
-//! Claude Code agent — shells out to the `claude` CLI in print mode.
+//! Claude Code agent — thin shim over the worker registry.
 //!
-//! Using the CLI rather than the API gives the user the full Claude Code
-//! experience (tool use, sandboxed shell, file edits, MCP). For voice replies
-//! we append a short system prompt that asks Claude to keep the answer
-//! conversational and free of markdown — anything else sounds wrong over TTS.
+//! As of spec 0008 (orchestrator C), the canonical definition of "how to
+//! talk to Claude" lives in `~/.config/jarvis/workers/claude.toml` (a
+//! bundled starter manifest is dropped there on first run). This module
+//! now exists only as a bridge between the legacy [`Agent`] trait — which
+//! the pipeline still consumes — and the new [`WorkerHandle`] trait that
+//! every worker (built-in or external manifest) implements.
+//!
+//! When hija A lands and the pipeline goes through the dispatcher /
+//! registry / worker-handle path directly, this shim becomes dead code
+//! and can be removed.
 
-use std::io::Write;
-use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::path::PathBuf;
+use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use tracing::warn;
 
 use super::claude_attach::{self, Attachment};
-use super::{Agent, opt_bool, opt_f64, opt_string, opt_string_vec};
+use super::{Agent, opt_bool, opt_string};
+use crate::config;
 use crate::session::Turn;
+use crate::workers::{ManifestWorker, WorkerHandle, WorkerInvocation, WorkerManifest, WorkerRegistry};
 
-const DEFAULT_SYSTEM_PROMPT: &str = "You are a voice assistant. Reply concisely in 1-3 sentences unless the \
-     user explicitly asks for detail. Avoid markdown — your reply will be \
-     spoken aloud.";
+/// `[agent].options` keys that have been migrated into the worker
+/// manifest. If a user still has them set in `config.toml` we log a
+/// deprecation warning at construction time and *ignore* the values —
+/// they have to edit `~/.config/jarvis/workers/claude.toml` to get the
+/// effect. Per the spec 0008 refinement, this is the (a) deprecation
+/// path agreed with the user.
+const DEPRECATED_OPTIONS: &[&str] = &["binary", "system_prompt", "extra_args", "timeout"];
 
 pub struct ClaudeAgent {
-    binary: String,
-    system_prompt: Option<String>,
-    extra_args: Vec<String>,
+    /// The actual worker implementation, loaded from the registry.
+    /// `Arc<dyn WorkerHandle>` so the same handle can be shared with
+    /// future callers (the dispatcher in hija A) without re-loading the
+    /// registry every turn.
+    inner: Arc<dyn WorkerHandle>,
+    /// Working directory for attachment resolution and (when set) the
+    /// spawned worker's cwd. Stays in `[agent].options` because it
+    /// drives Jarvis-side decisions (`claude_attach::resolve` uses it
+    /// to find the right project namespace under `~/.claude/projects/`).
     cwd: Option<String>,
-    /// `[agent].auto_resume` — at every turn pick the newest Claude
-    /// session JSONL under `cwd`'s project namespace and pass it via
-    /// `--resume`. The cache-file attachment (when present) overrides
-    /// this entirely; see `claude_attach::resolve` for the priority.
+    /// `[agent].options.auto_resume`: when true, resolve the active
+    /// Claude session UUID from the newest JSONL in this thread's
+    /// project namespace at every turn. Same semantics as before C-4.
     auto_resume: bool,
-    timeout: Duration,
 }
 
 impl ClaudeAgent {
     pub fn from_options(opts: toml::Table) -> Result<Self> {
-        let binary =
-            opt_string(&opts, "binary", Some("claude"))?.unwrap_or_else(|| "claude".into());
-        let system_prompt = opt_string(&opts, "system_prompt", Some(DEFAULT_SYSTEM_PROMPT))?;
-        let extra_args = opt_string_vec(&opts, "extra_args")?;
+        warn_deprecated_options(&opts);
+
         let cwd = opt_string(&opts, "cwd", None)?;
         let auto_resume = opt_bool(&opts, "auto_resume", false)?;
-        let timeout_secs = opt_f64(&opts, "timeout", 60.0)?;
 
-        if which::which(&binary).is_err() {
-            warn!(
-                binary = %binary,
-                "claude binary not found in PATH — agent will fail at runtime"
-            );
-        }
+        // Make sure the workers/ directory exists and has the starter
+        // claude.toml. Idempotent — does nothing if the file is already
+        // there, so users who have customised the manifest keep their
+        // edits across daemon restarts.
+        let _ = config::ensure_workers_dir()
+            .with_context(|| "ensuring ~/.config/jarvis/workers/ exists");
+
+        // Load every manifest under workers/. Failures inside the
+        // registry are surfaced as `disabled` entries, not errors —
+        // the daemon should always boot.
+        let registry = WorkerRegistry::load_from_dir(
+            &config::workers_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        );
+
+        let inner = match registry.get("claude") {
+            Some(w) => w,
+            None => {
+                // Either the manifest is missing, malformed, or its
+                // binary is absent from PATH. Match the legacy "warn
+                // and proceed" behaviour by falling back to the
+                // bundled starter manifest in-memory: this lets the
+                // agent construct successfully and fail loudly at
+                // *invoke* time if `claude` truly isn't installed.
+                let disabled_reason = registry
+                    .disabled_workers()
+                    .iter()
+                    .find(|d| d.id.as_deref() == Some("claude"))
+                    .map(|d| d.reason.clone())
+                    .unwrap_or_else(|| "no claude manifest in registry".to_string());
+                warn!(
+                    reason = %disabled_reason,
+                    "claude worker not active in registry — using bundled starter as fallback. Runtime spawn may still fail if `claude` is missing."
+                );
+                let manifest = WorkerManifest::from_toml_str(config::STARTER_CLAUDE_MANIFEST)
+                    .context("parsing bundled STARTER_CLAUDE_MANIFEST")?;
+                let worker = ManifestWorker::new(manifest, PathBuf::from("<bundled>"))?;
+                Arc::new(worker) as Arc<dyn WorkerHandle>
+            }
+        };
+
         Ok(Self {
-            binary,
-            system_prompt,
-            extra_args,
+            inner,
             cwd,
             auto_resume,
-            timeout: Duration::from_secs_f64(timeout_secs.max(1.0)),
         })
     }
 
-    /// Resolve the active `Attachment` once per turn. The cache state
-    /// file is consulted on every call (cheap; one fs::read) so the
-    /// user's `jarvis claude attach` change applies immediately without
-    /// restarting the daemon.
+    /// Resolve the active `Attachment` once per turn. Cache state file
+    /// is consulted on every call (cheap) so `jarvis agent attach`
+    /// changes apply immediately without restarting the daemon.
     fn current_attachment(&self) -> Attachment {
         let state = claude_attach::load_state().ok().flatten();
         claude_attach::resolve(state.as_ref(), self.cwd.as_deref(), self.auto_resume)
@@ -75,42 +117,13 @@ impl Agent for ClaudeAgent {
     }
 
     fn respond(&self, prompt: &str, history: &[Turn]) -> Result<String> {
-        let mut cmd = Command::new(&self.binary);
-        cmd.arg("--print");
-
-        // Session resume: if attached (pinned or auto-latest), pass
-        // `--resume <uuid>` so Claude Code loads the prior conversation
-        // (tool calls, file edits, system messages — full fidelity).
-        // We log which session is being resumed so the daemon log shows
-        // it for the user.
-        let attachment = self.current_attachment();
-        if let Some(uuid) = attachment.to_uuid() {
-            tracing::info!(session = %uuid, "claude --resume");
-            cmd.args(["--resume", &uuid]);
-        }
-
-        if let Some(sp) = &self.system_prompt {
-            cmd.args(["--append-system-prompt", sp]);
-        }
-        for a in &self.extra_args {
-            cmd.arg(a);
-        }
-        if let Some(cwd) = &self.cwd {
-            cmd.current_dir(cwd);
-        }
-
-        // Mark this invocation as Jarvis-issued so user Stop hooks can
-        // skip themselves and avoid double-narration. The voice pipeline
-        // already speaks the assistant's full reply via TTS; if a Stop
-        // hook also speaks a one-sentence summary, the user hears two
-        // overlapping responses on every voice turn. Hooks that want to
-        // be polite to Jarvis check this env var and exit early.
-        cmd.env("JARVIS_VOICE_TURN", "1");
-
-        // Compose history into the prompt: claude --print is stateless per
-        // invocation, so we embed prior turns as labelled "User:" /
-        // "Assistant:" blocks and end with the current "User:" turn. The
-        // model handles the conversational frame natively.
+        // Compose history into the prompt: claude --print is stateless
+        // per invocation, so we embed prior turns as labelled "User:" /
+        // "Assistant:" blocks and end with the current "User:" turn.
+        // The model handles the conversational frame natively. This is
+        // the same shape ClaudeAgent used pre-shim; the manifest takes
+        // the resulting text on stdin via the {prompt}-not-in-argv
+        // detection in `ManifestWorker::invoke`.
         let full_prompt = if history.is_empty() {
             prompt.to_string()
         } else {
@@ -126,32 +139,85 @@ impl Agent for ClaudeAgent {
             buf
         };
 
-        let mut child = cmd
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .with_context(|| format!("spawning {}", self.binary))?;
-        child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| anyhow!("claude stdin unavailable"))?
-            .write_all(full_prompt.as_bytes())?;
-        // Closing stdin signals EOF so claude doesn't wait forever.
-        drop(child.stdin.take());
-
-        // Rust's std::process doesn't have a built-in timeout. For an MVP we
-        // wait synchronously; if claude hangs the user kills the daemon. A
-        // follow-up can wrap this in `wait_timeout` if it becomes annoying.
-        let _ = self.timeout;
-        let out = child.wait_with_output()?;
-        if !out.status.success() {
-            return Err(anyhow!(
-                "claude exited with {}: {}",
-                out.status,
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
+        // Resolve which Claude session UUID to resume (if any). The
+        // shim still owns this logic because it depends on `cwd` and
+        // `auto_resume`, both of which are Jarvis-side concerns
+        // outside the manifest's scope.
+        let attachment = self.current_attachment();
+        let session_id = attachment.to_uuid();
+        if let Some(uuid) = &session_id {
+            tracing::info!(session = %uuid, "claude --resume");
         }
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+
+        let response = self.inner.invoke(&WorkerInvocation {
+            prompt: &full_prompt,
+            session_id: session_id.as_deref(),
+            cwd: self.cwd.as_deref(),
+        })?;
+        Ok(response.text)
+    }
+}
+
+fn warn_deprecated_options(opts: &toml::Table) {
+    for key in DEPRECATED_OPTIONS {
+        if opts.contains_key(*key) {
+            warn!(
+                option = %key,
+                "[agent].options.{key} is deprecated and ignored. Edit \
+                 ~/.config/jarvis/workers/claude.toml to customise Claude's \
+                 command line, system prompt, or arguments."
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `warn_deprecated_options` should not panic for any combination
+    /// of deprecated keys, present or absent. The log output is
+    /// observed by humans, not asserted on here — the test exists to
+    /// keep the helper from crashing on edge-case inputs.
+    #[test]
+    fn warn_deprecated_handles_all_keys() {
+        let mut opts = toml::Table::new();
+        // All deprecated keys present.
+        for key in DEPRECATED_OPTIONS {
+            opts.insert((*key).into(), toml::Value::String("anything".into()));
+        }
+        warn_deprecated_options(&opts);
+
+        // None present.
+        warn_deprecated_options(&toml::Table::new());
+
+        // One present.
+        let mut single = toml::Table::new();
+        single.insert("system_prompt".into(), toml::Value::String("X".into()));
+        warn_deprecated_options(&single);
+    }
+
+    /// The bundled starter manifest must parse cleanly via the same
+    /// validator the registry uses. If this fails the fallback path
+    /// in `from_options` is broken — and shipping a malformed
+    /// starter would be a release-blocking bug.
+    #[test]
+    fn bundled_starter_manifest_parses() {
+        let m = WorkerManifest::from_toml_str(config::STARTER_CLAUDE_MANIFEST)
+            .expect("bundled starter parses");
+        assert_eq!(m.id, "claude");
+        assert!(m.stateful, "claude is stateful (resumable session)");
+        assert!(m.async_eligible, "claude is async-eligible");
+        assert!(!m.tty, "claude --print uses plain pipes");
+        // command should resume; initial_command should not.
+        assert!(m.command.iter().any(|a| a == "--resume"));
+        assert!(
+            m.initial_command
+                .as_ref()
+                .expect("initial_command present")
+                .iter()
+                .all(|a| a != "--resume"),
+            "initial_command must omit --resume on first turn"
+        );
     }
 }

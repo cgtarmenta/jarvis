@@ -194,6 +194,13 @@ impl WorkerHandle for ManifestWorker {
         if let Some(cwd) = ctx.cwd {
             cmd.current_dir(cwd);
         }
+        // `JARVIS_VOICE_TURN=1` is the cross-cutting protocol signal
+        // every Jarvis-spawned worker carries. Stop hooks observe it
+        // to skip double-narration (see `feedback_stop_hook_recursion`
+        // memory). Setting it here at the trait impl layer means
+        // future built-in handlers and manifest workers both inherit
+        // the behaviour without each having to remember to set it.
+        cmd.env("JARVIS_VOICE_TURN", "1");
         cmd.stdin(if prompt_in_argv {
             Stdio::null()
         } else {
