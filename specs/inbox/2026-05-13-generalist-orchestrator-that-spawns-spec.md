@@ -11,11 +11,14 @@ related:
 
 # Generalist orchestrator that spawns specialized workers
 
-> **Note — vision-level entry, not a finalised spec.** This was
-> captured at the end of a long live-debugging session where the
-> user articulated that the model behind Jarvis no longer matches
-> what they imagined originally. Treat the "What" bullets below
-> as starting points to refine, not as agreed acceptance criteria.
+> **Note — umbrella spec, intentionally remains in `inbox/`.**
+> This document holds the *rationale* and the *resolved design
+> decisions* for the orchestrator vision. Implementation work
+> lives in five child specs (see **Implementation plan** below)
+> that each promote/ship independently. The umbrella is not
+> meant to be promoted to `active/` or shipped; it stays here
+> as the canonical reference for why the children look the way
+> they do. Reject it only if the vision itself is abandoned.
 
 ## Why
 
@@ -129,60 +132,147 @@ Sketch only — design decisions deferred to active-spec phase:
   and tractable, but they solve problems we don't have yet.
   Re-evaluate after the basic listener + spawn flow lands.
 
-## Open questions (to resolve before promotion)
+## Resolved design decisions
 
-Four design decisions block the rest. They block each other in roughly
-this order, so we attack them in this order.
+Resolved during refinement session on 2026-05-14. Each links to
+the child spec that turns the decision into shippable code.
 
-1. **What *is* the listener?** This determines the latency floor, what
-   "cheap to keep warm" actually costs in RAM and dollars, and what
-   kinds of decisions the listener can make. Sub-options:
-   - **(1a)** Hand-coded rule engine (regex / keyword intent table,
-     similar to the existing `src/specs/intent.rs`). Latency under
-     a millisecond, no API cost, no RAM tail. Each new pattern is
-     code, not config.
-   - **(1b)** Small persistent local LLM (Qwen2.5-0.5B, Llama-3.2-1B,
-     Phi-3.5-mini, etc. via `llama.cpp`/`mistral.rs`). Latency
-     ~200–500 ms on CPU. No API cost. ~200 MB–1 GB resident RAM.
-     Quality at this size is hit-or-miss for Spanish intent
-     classification — needs testing.
-   - **(1c)** Lightweight remote LLM (Claude Haiku 4.5, Gemini
-     Flash, GPT-4o-mini). Latency ~200–400 ms. High quality.
-     Per-turn API cost (small but non-zero). Data leaves the
-     machine. Auth handling we'd inherit from whichever CLI agent
-     binary the user already has installed.
+### 1. The listener is a *cascade*, not a single thing.
 
-2. **Where does conversational memory live?** Today there's one
-   global `session.json`. With multiple workers it has to split:
-   - **(2a)** Listener owns the memory; workers are stateless per
-     turn, prompted with whatever the listener decides to include.
-   - **(2b)** Each worker owns its own session (claude has one,
-     gemini has one, etc.); the listener only routes.
-   - **(2c)** Hybrid: listener carries short-term context for
-     dispatch, each worker maintains its own long-term session
-     that the listener resumes on subsequent calls to that worker.
+Three sequential stages. Stage 2 is optional and pluggable.
 
-3. **Are async tasks queryable after dispatch?** "Spawn and forget"
-   can mean two very different things:
-   - **(3a)** Fire-and-forget only: dispatch, capture stdout, notify
-     when done. No way to ask about an in-flight task — if you forget
-     what you spawned, it's gone until it completes.
-   - **(3b)** Tracked: an in-memory (or on-disk) task registry. The
-     listener can answer "¿qué tareas tengo corriendo?", "cancela
-     la última", "muéstrame el resultado del análisis del log".
-     Significantly more code, but it's where the orchestrator stops
-     feeling like a glorified shell-out and starts feeling like
-     actual delegation.
+```
+transcript
+   │
+   ├─► (stage 1) hand-coded intent matcher  ─► hit  → dispatch directly
+   │
+   ├─► (stage 2) LlmBackend.classify        ─► intent → dispatch by worker id
+   │             (optional; configured under [listener.fallback])
+   │
+   └─► (stage 3) default worker (current Claude session attach)
+```
 
-4. **How is a worker declared?** The spec promises "config change,
-   not Rust diff" — but the shape isn't settled:
-   - **(4a)** A `[[workers]]` array of stanzas inside the existing
-     `~/.config/jarvis/config.toml`.
-   - **(4b)** Separate manifests in `~/.config/jarvis/workers/*.toml`,
-     one per worker, autodiscovered on startup.
-   - **(4c)** Plugin-style: each worker is an executable on PATH
-     that implements a small handshake protocol (manifest on
-     `--describe`, request/response on stdin/stdout).
+- Stage 1 is built-in handlers (time, calc, spec management, session
+  reset) plus user-installable intent matchers. Sub-millisecond per
+  hit, zero RAM tail, zero API cost. Handles the obvious 70-80% of
+  voice turns.
+- Stage 2 is a `LlmBackend` trait with two implementations at v1:
+  `OzCliBackend` (wraps `oz agent run --model <X>` for Warp's open-
+  source model lineup) and `OpenAiCompatBackend` (HTTP against any
+  OpenAI-compatible endpoint, covering Triton/vLLM/Ollama/Groq/etc).
+  The user's GB200 + Triton infra is a first-class target.
+- Stage 3 is the existing claude session attach. Unchanged.
+
+Implementation: **hija A** (stages 1 + 3, dispatcher trait, built-in
+handlers) and **hija B** (stage 2, LLM backends).
+
+### 2. Memory is hybrid: listener short-term + workers long-term.
+
+Listener guards a per-thread short-term history (~5-10 turns, reuses
+the existing `max_turns` cap) plus an `active_workers: HashMap<String,
+Option<String>>` mapping worker id → its session id. Stateful workers
+(claude, gemini) keep their own long-term context internally and are
+resumed by id. Stateless workers (time, calc) receive a fully-resolved
+query and return without storing anything.
+
+`session.json` schema is extended in place — the existing turns array
+gains `dispatched_to` and `worker_session_id` fields, and a new
+`active_workers` top-level field appears.
+
+**Multi-thread is explicitly v1-out:** one conversational thread at
+a time. Multiple tasks can run in parallel *within* a thread (via
+the task registry below); multiple independent threads are v2.
+
+Implementation: **hija D**.
+
+### 3. Async tasks are tracked, not fire-and-forget.
+
+Each task spawned by the listener has a persistent record in
+`~/.cache/jarvis/tasks/<task-id>.json` with status (running |
+completed | failed | cancelled | orphaned), captured output path, and
+metadata. The user queries the registry via voice or CLI; OS
+notifications fire on completion.
+
+Tasks are tied to the conversational thread that spawned them via
+`thread_id`, so "¿qué tareas tengo?" defaults to the active thread.
+Multi-task within a thread is supported (parallel claude + gemini
+both spawned in one conversation); multi-thread is v2.
+
+Split into two shipping phases:
+
+- **Foundation:** registry + CLI commands (`jarvis task list/show/
+  cancel/clean`) + completion watcher + notifications.
+- **Voice surface:** voice intents ("qué tareas tengo", "cancela la
+  última", "muéstrame el resultado de X") layered on the foundation.
+
+Implementation: **hijas E1** and **E2**.
+
+### 4. Workers are declared per-file in `~/.config/jarvis/workers/`.
+
+External workers (claude, gemini-cli, oz, custom) live in
+`~/.config/jarvis/workers/*.toml`, one TOML per worker, autodiscovered
+at daemon startup. Schema fields: `id`, `description`, `command`
+(with `{prompt}` / `{session_id}` / `{cwd}` placeholders),
+`initial_command` (for stateful workers on first invocation),
+`stateful`, `session_id_capture`, `async_eligible`, `tty`, and
+`dispatch_hint` (free-form text consumed by stage 2 LLM dispatcher).
+
+Built-in handlers (time, calc, spec, session-reset) are *not* in
+manifests — they're code in `src/handlers/` that self-registers at
+startup and is exposed to the dispatcher alongside external workers.
+
+Plugin-style (executable + `--describe` handshake) is left as future
+work; the manifest format is sufficient for v1.
+
+Validation at startup: malformed manifests or missing binaries warn-
+and-disable the affected worker. The daemon never crashes due to a
+bad manifest. `jarvis worker list` shows all workers with status.
+
+Implementation: **hija C**.
+
+## Implementation plan
+
+Six child specs, four phases. Each child is shippable independently
+once its dependencies are met.
+
+```
+Phase 1 — Foundation (no user-visible behavior change)
+  ├─ C  Worker manifests + autodiscovery
+  └─ D  Multi-worker memory schema (extend session.json)
+
+Phase 2 — First user value (deterministic intents)
+  └─ A  Dispatcher trait + built-in handlers
+       deps: C (workers must be declarable), D (memory schema)
+
+Phase 3 — Async delegation
+  └─ E1  Task registry foundation + CLI + notifications
+        deps: C (workers need async_eligible flag)
+
+Phase 4 — Polish & extensibility (parallelisable)
+  ├─ B   LLM dispatcher backends (OzCli, OpenAiCompat)
+  │      deps: A (dispatcher trait), C (worker dispatch_hints)
+  └─ E2  Voice intents over the task registry
+         deps: A (intent matcher), E1 (registry exists)
+```
+
+Dependency rules:
+- **C must land first.** Everything else references the manifest schema.
+- **D can land in parallel with C.** Both are no-behavior-change schema
+  work.
+- **A blocks on C+D.** Needs workers to be declarable and the session
+  schema to support multi-worker.
+- **E1 blocks on C only.** Doesn't strictly need A to function as a
+  CLI surface, though voice triggers via A make it useful.
+- **B and E2 are independent of each other** and both land after A
+  and E1 respectively.
+
+Status of children (created in `inbox/` alongside this umbrella):
+- `inbox/2026-05-14-orchestrator-c-worker-manifests-and-auto.md`
+- `inbox/2026-05-14-orchestrator-d-multi-worker-memory-schem.md`
+- `inbox/2026-05-14-orchestrator-a-dispatcher-trait-and-buil.md`
+- `inbox/2026-05-14-orchestrator-e1-task-registry-foundation.md`
+- `inbox/2026-05-14-orchestrator-b-llm-dispatcher-backends.md`
+- `inbox/2026-05-14-orchestrator-e2-voice-intents-over-task.md`
 
 ## Journal
 
@@ -198,6 +288,18 @@ this order, so we attack them in this order.
   (the orthogonal capture-architecture rework), and
   `project_voice_turn_latency.md` memory (the cold-spawn
   cost this would address).
+
+- 2026-05-14: refinement session resolved all four open
+  questions. Decision rationale is preserved inline in
+  the "Resolved design decisions" section above. The work
+  decomposes into six child specs (created same day in
+  `inbox/`), grouped into four implementation phases. This
+  umbrella stays in `inbox/` indefinitely as the rationale
+  reference; child specs each promote/ship on their own
+  cadence. Notable scope cuts agreed: multi-thread support
+  (v2), tmux-style attach/detach (out), multi-agent pipelines
+  (out), plugin-style worker handshake (future), LLM
+  auto-summarisation of task output (out of v1).
 
 - 2026-05-13 (later): the user fed the spec into Gemini and
   got back a more expansive proposal. After honest filtering,
