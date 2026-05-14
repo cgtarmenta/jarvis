@@ -30,6 +30,31 @@ pub fn run(cfg: JarvisConfig) -> Result<()> {
         return Ok(());
     }
 
+    // Spec 0011 / E1-5: initialise the task registry on startup.
+    // Orphan-reconcile any tasks left in `Running` from a previous
+    // daemon process that died mid-task, then autoprune the
+    // terminal tail so the cache dir stays bounded.
+    match crate::tasks::TaskRegistry::default_dir() {
+        Ok(task_dir) => {
+            let mut task_reg = crate::tasks::TaskRegistry::load_from_dir(&task_dir);
+            task_reg.reconcile_orphans();
+            let pruned = crate::tasks::autoprune_terminal_tasks(
+                &task_dir,
+                &task_reg,
+                cfg.tasks.max_retained,
+            );
+            info!(
+                active = task_reg.active().count(),
+                terminal = task_reg.all().iter().filter(|t| t.status.is_terminal()).count(),
+                pruned,
+                "task registry initialised"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not initialise task registry");
+        }
+    }
+
     let backend = wake::build(cfg.wake.clone(), cfg.stt.clone())?;
     info!(
         backend = backend.name(),

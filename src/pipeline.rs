@@ -197,7 +197,90 @@ pub fn run_turn(cfg: &JarvisConfig, opts: TurnOptions) -> Result<Option<String>>
         // agents (openai, gemini, warp, shell) don't have manifests
         // yet (deferred from spec C), so we keep their
         // `Agent`-trait path alive as a fallback.
-        let response = if let Some(worker) = registry.get(&decision.worker_id) {
+        // Spec 0011 / E1-5: async trigger detection. If the
+        // user's utterance contains an "avísame cuando termine"
+        // style phrase AND the chosen worker is async-eligible
+        // (manifest flag), spawn the worker as a background
+        // task instead of waiting synchronously. The user gets
+        // an immediate TTS acknowledgement; the supervisor
+        // thread fires an OS notification when the worker
+        // eventually exits.
+        let async_trigger_present = crate::tasks::is_async_trigger(&prompt);
+        let worker_handle = registry.get(&decision.worker_id);
+        let async_eligible_worker = worker_handle
+            .as_ref()
+            .map(|w| w.async_eligible())
+            .unwrap_or(false);
+
+        if async_trigger_present && async_eligible_worker {
+            // Safe to unwrap: the eligibility check above
+            // confirmed `worker_handle` is Some.
+            let worker = worker_handle.as_ref().unwrap();
+            let task_dir = match crate::tasks::TaskRegistry::default_dir() {
+                Ok(d) => d,
+                Err(e) => return Err(e).context("resolving tasks dir"),
+            };
+            let (task, _supervisor) = crate::tasks::spawn_async_task(
+                worker.as_ref(),
+                &WorkerInvocation {
+                    prompt: &decision.resolved_prompt,
+                    session_id: decision.session_id.as_deref(),
+                    cwd: None,
+                },
+                &task_dir,
+                &sess.id,
+                &prompt,
+            )
+            .with_context(|| {
+                format!(
+                    "spawning async task for worker {:?}",
+                    decision.worker_id
+                )
+            })?;
+            info!(task_id = %task.id, "async task spawned for trigger phrase");
+
+            let ack = format!(
+                "Listo, te aviso cuando {} termine.",
+                decision.worker_id
+            );
+
+            // Persist a synthetic turn pair: the user's prompt and
+            // Jarvis's "te aviso" ack. The actual worker reply
+            // goes to the task's stdout.txt and surfaces via OS
+            // notification — not into session.json. Voice-driven
+            // task queries are spec E2's job.
+            if cfg.session.enabled {
+                sess.add_turn_for_worker(
+                    Role::User,
+                    prompt.clone(),
+                    decision.worker_id.clone(),
+                    decision.session_id.clone(),
+                );
+                sess.add_turn_for_worker(
+                    Role::Assistant,
+                    ack.clone(),
+                    decision.worker_id.clone(),
+                    decision.session_id.clone(),
+                );
+                sess.set_active_worker_session(
+                    decision.worker_id.clone(),
+                    decision.session_id.clone(),
+                );
+                sess.truncate_to(cfg.session.max_turns);
+                if let Err(e) = session::save(&sess) {
+                    warn!(error = %e, "failed to persist session — continuing");
+                }
+            }
+
+            if let Some(tts) = &tts_engine
+                && !ack.is_empty()
+            {
+                tts.speak(&ack)?;
+            }
+            return Ok(Some(ack));
+        }
+
+        let response = if let Some(worker) = worker_handle.as_ref() {
             worker
                 .invoke(&WorkerInvocation {
                     prompt: &decision.resolved_prompt,

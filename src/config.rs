@@ -376,6 +376,27 @@ impl Default for SessionConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default, deny_unknown_fields)]
+pub struct TasksConfig {
+    /// How many terminal-status (completed/failed/cancelled/orphaned)
+    /// tasks to keep on disk before the daemon's startup auto-prune
+    /// drops the oldest. Active (Running) tasks are never affected by
+    /// this cap.
+    pub max_retained: usize,
+}
+
+impl Default for TasksConfig {
+    fn default() -> Self {
+        Self {
+            // Spec 0011: keep the last 50 terminal records by default;
+            // generous enough for normal use, bounded enough to keep
+            // the cache dir tidy.
+            max_retained: 50,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default, deny_unknown_fields)]
 pub struct JarvisConfig {
     /// Schema version. See `CURRENT_CONFIG_VERSION` for the changelog.
     pub config_version: u32,
@@ -387,6 +408,7 @@ pub struct JarvisConfig {
     pub tts: TtsConfig,
     pub agent: AgentConfig,
     pub session: SessionConfig,
+    pub tasks: TasksConfig,
 }
 
 impl Default for JarvisConfig {
@@ -401,6 +423,7 @@ impl Default for JarvisConfig {
             tts: TtsConfig::default(),
             agent: AgentConfig::default(),
             session: SessionConfig::default(),
+            tasks: TasksConfig::default(),
         }
     }
 }
