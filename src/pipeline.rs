@@ -17,8 +17,8 @@ use tracing::{info, warn};
 use crate::agents;
 use crate::config::{self as cfg_mod, JarvisConfig, RecordConfig};
 use crate::dispatcher::{
-    BuiltinIntentDispatcher, CascadeDispatcher, DefaultWorkerDispatcher, Dispatcher, LlmDispatcher,
-    build_llm_stage,
+    BuiltinIntentDispatcher, CascadeDispatcher, DefaultWorkerDispatcher, Dispatcher, IntentMatcher,
+    LlmDispatcher, build_llm_stage,
 };
 use crate::handlers;
 use crate::recorder;
@@ -177,14 +177,7 @@ pub fn run_turn(cfg: &JarvisConfig, opts: TurnOptions) -> Result<Option<String>>
             &cfg_mod::workers_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         );
         let matchers = handlers::register_builtins(&mut registry, cfg);
-        let mut dispatcher = CascadeDispatcher::new()
-            .push(Box::new(BuiltinIntentDispatcher::from_matchers(matchers)));
-        if let Some(llm) = llm_stage(cfg) {
-            dispatcher = dispatcher.push(Box::new(LlmStageHandle(llm)));
-        }
-        let dispatcher = dispatcher.push(Box::new(DefaultWorkerDispatcher::new(
-            cfg.agent.name.clone(),
-        )));
+        let dispatcher = build_cascade(cfg, matchers, llm_stage(cfg));
 
         let decision = dispatcher
             .dispatch(&prompt, &sess, &registry)?
@@ -359,36 +352,61 @@ pub fn run_turn(cfg: &JarvisConfig, opts: TurnOptions) -> Result<Option<String>>
 /// "v1 two-stage cascade" behaviour the spec mandates.
 static LLM_STAGE: OnceLock<Option<Arc<LlmDispatcher>>> = OnceLock::new();
 
+/// Build the stage-2 dispatcher from `cfg.dispatcher.fallback` *or*
+/// return `None`. Pure function: no global state, no caching. The
+/// `OnceLock`-backed [`llm_stage`] wraps this for production use;
+/// tests call this directly so each `JarvisConfig` shape gets a
+/// fresh evaluation (the OnceLock would otherwise pin the first
+/// result for the rest of the process).
+///
+/// Soft-fails: `Some(invalid_toml)` → log + `None`. The daemon
+/// still starts with the v1 cascade shape.
+fn try_build_llm_stage(cfg: &JarvisConfig) -> Option<Arc<LlmDispatcher>> {
+    let raw = cfg.dispatcher.fallback.as_ref()?;
+    match build_llm_stage(raw) {
+        Ok(d) => {
+            info!(
+                backend = d.backend_name(),
+                "dispatcher stage 2 (LLM) initialised"
+            );
+            Some(Arc::new(d))
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                "[dispatcher.fallback] malformed; cascade reverts to v1 two-stage shape"
+            );
+            None
+        }
+    }
+}
+
 /// Resolve the stage-2 LLM dispatcher for this `cfg`. Initializes
 /// the [`LLM_STAGE`] OnceLock on first call; returns the same
 /// `Arc` thereafter so the cache persists.
-///
-/// A malformed `[dispatcher.fallback]` block is intentionally
-/// non-fatal: `build_llm_stage` returns `Err`, we log a warning,
-/// and the daemon proceeds with the v1 cascade shape. This is the
-/// spec's "soft-fail on bad config" requirement.
 fn llm_stage(cfg: &JarvisConfig) -> Option<Arc<LlmDispatcher>> {
-    LLM_STAGE
-        .get_or_init(|| {
-            let raw = cfg.dispatcher.fallback.as_ref()?;
-            match build_llm_stage(raw) {
-                Ok(d) => {
-                    info!(
-                        backend = d.backend_name(),
-                        "dispatcher stage 2 (LLM) initialised"
-                    );
-                    Some(Arc::new(d))
-                }
-                Err(e) => {
-                    warn!(
-                        error = %e,
-                        "[dispatcher.fallback] malformed; cascade reverts to v1 two-stage shape"
-                    );
-                    None
-                }
-            }
-        })
-        .clone()
+    LLM_STAGE.get_or_init(|| try_build_llm_stage(cfg)).clone()
+}
+
+/// Assemble the dispatcher cascade for one turn. Pulled out of
+/// `run_turn` so tests can verify the conditional stage-2
+/// insertion without spinning up STT / TTS / agents. The cascade
+/// always has stages 1 (built-in matchers) and 3 (default
+/// worker); stage 2 (LLM) is conditional on `llm_stage` being
+/// `Some`.
+fn build_cascade(
+    cfg: &JarvisConfig,
+    matchers: Vec<Arc<dyn IntentMatcher>>,
+    llm_stage: Option<Arc<LlmDispatcher>>,
+) -> CascadeDispatcher {
+    let mut cascade =
+        CascadeDispatcher::new().push(Box::new(BuiltinIntentDispatcher::from_matchers(matchers)));
+    if let Some(llm) = llm_stage {
+        cascade = cascade.push(Box::new(LlmStageHandle(llm)));
+    }
+    cascade.push(Box::new(DefaultWorkerDispatcher::new(
+        cfg.agent.name.clone(),
+    )))
 }
 
 /// Adapter that lets `Arc<LlmDispatcher>` be pushed onto the
@@ -466,5 +484,193 @@ mod tests {
         let opts = TurnOptions::default();
         assert!(!opts.play_cue);
         assert!(opts.record_override.is_none());
+    }
+
+    /// Spec 0013 / B-4: `[dispatcher.fallback]` absent → no stage 2.
+    /// The pipeline still runs (just with the v1 two-stage cascade).
+    /// This is the zero-config default every existing install gets.
+    #[test]
+    fn try_build_llm_stage_returns_none_when_fallback_absent() {
+        let cfg = JarvisConfig::default();
+        assert!(cfg.dispatcher.fallback.is_none());
+        assert!(try_build_llm_stage(&cfg).is_none());
+    }
+
+    /// Spec 0013 / B-4: a well-formed `[dispatcher.fallback]`
+    /// produces a stage-2 dispatcher. The dispatcher's backend name
+    /// confirms which backend got picked, which is also the
+    /// surface `jarvis dispatcher status` (future) will report.
+    #[test]
+    fn try_build_llm_stage_returns_some_for_valid_oz_config() {
+        let mut cfg = JarvisConfig::default();
+        cfg.dispatcher.fallback = Some(toml::Value::Table(toml::toml! {
+            backend = "oz"
+            model = "test-model"
+        }));
+        let stage = try_build_llm_stage(&cfg).expect("should build");
+        assert_eq!(stage.backend_name(), "oz");
+    }
+
+    /// Same for the HTTP backend — verifies both branches of the
+    /// `match backend` in `build_llm_stage` go through the
+    /// pipeline helper cleanly.
+    #[test]
+    fn try_build_llm_stage_returns_some_for_valid_openai_compat_config() {
+        let mut cfg = JarvisConfig::default();
+        cfg.dispatcher.fallback = Some(toml::Value::Table(toml::toml! {
+            backend = "openai_compat"
+            endpoint = "http://localhost:11434/v1/chat/completions"
+            model = "llama-3.1-8b"
+        }));
+        let stage = try_build_llm_stage(&cfg).expect("should build");
+        assert_eq!(stage.backend_name(), "openai_compat");
+    }
+
+    /// Spec 0013 / B-4: malformed `[dispatcher.fallback]` returns
+    /// `None` rather than propagating the error. The daemon
+    /// boots, the cascade reverts to v1 two-stage shape, and the
+    /// error surfaces only as a tracing WARN. Critical invariant:
+    /// a typo in the dispatcher fallback config must never brick
+    /// the daemon.
+    #[test]
+    fn try_build_llm_stage_soft_fails_on_malformed_fallback() {
+        let mut cfg = JarvisConfig::default();
+        cfg.dispatcher.fallback = Some(toml::Value::Table(toml::toml! {
+            backend = "magic-router"
+            model = "x"
+        }));
+        assert!(
+            try_build_llm_stage(&cfg).is_none(),
+            "unknown backend should soft-fail to None"
+        );
+    }
+
+    /// Missing required fields (here: oz without `model`) also
+    /// soft-fails to `None`. Same daemon-keeps-booting contract.
+    #[test]
+    fn try_build_llm_stage_soft_fails_on_missing_required_field() {
+        let mut cfg = JarvisConfig::default();
+        cfg.dispatcher.fallback = Some(toml::Value::Table(toml::toml! {
+            backend = "oz"
+        }));
+        assert!(try_build_llm_stage(&cfg).is_none());
+    }
+
+    /// Spec 0013 / B-4: cascade omits stage 2 when no LLM
+    /// dispatcher is supplied. The v1 cascade shape — built-in
+    /// matchers + default worker — is what every existing install
+    /// currently runs, and it must stay reachable.
+    #[test]
+    fn cascade_has_two_stages_without_llm() {
+        let cfg = JarvisConfig::default();
+        let cascade = build_cascade(&cfg, Vec::new(), None);
+        assert_eq!(cascade.stage_count(), 2, "matcher + default; no LLM stage");
+    }
+
+    /// Spec 0013 / B-4: cascade adds stage 2 when an LLM
+    /// dispatcher is supplied. End-to-end shape verification —
+    /// the cascade tests in `dispatcher::cascade` cover ordering;
+    /// here we verify the pipeline's *insertion* of the stage.
+    #[test]
+    fn cascade_has_three_stages_with_llm() {
+        use crate::dispatcher::llm::testing::MockLlmBackend;
+        let cfg = JarvisConfig::default();
+        let llm = Arc::new(LlmDispatcher::new(Box::new(MockLlmBackend::declining())));
+        let cascade = build_cascade(&cfg, Vec::new(), Some(llm));
+        assert_eq!(
+            cascade.stage_count(),
+            3,
+            "matcher + LLM + default; stage 2 inserted"
+        );
+    }
+
+    /// End-to-end dispatch through the assembled cascade: stage 1
+    /// declines, stage 2's mock backend picks `claude`, the cascade
+    /// returns that decision rather than falling through to the
+    /// default. Exercises the wire-through that B-4 establishes;
+    /// without the LlmStageHandle adapter, the cascade couldn't
+    /// even hold the LlmDispatcher.
+    #[test]
+    fn cascade_routes_through_llm_stage_to_picked_worker() {
+        use crate::dispatcher::llm::testing::MockLlmBackend;
+        use crate::session::Session;
+        use crate::workers::{WorkerHandle, WorkerInvocation, WorkerRegistry, WorkerResponse};
+
+        struct FakeClaude;
+        impl WorkerHandle for FakeClaude {
+            fn id(&self) -> &str {
+                "claude"
+            }
+            fn invoke(&self, _: &WorkerInvocation<'_>) -> Result<WorkerResponse> {
+                unreachable!("test should not invoke")
+            }
+        }
+
+        let cfg = JarvisConfig::default();
+        let llm = Arc::new(LlmDispatcher::new(Box::new(MockLlmBackend::picking(
+            "claude",
+        ))));
+        let cascade = build_cascade(&cfg, Vec::new(), Some(llm));
+
+        let mut registry = WorkerRegistry::default();
+        registry.register_builtin(Arc::new(FakeClaude));
+        let session = Session::new();
+
+        let decision = cascade
+            .dispatch("explícame los protocolos de gossip", &session, &registry)
+            .unwrap()
+            .expect("stage 2 picks claude");
+        assert_eq!(decision.worker_id, "claude");
+    }
+
+    /// When stage 2's backend declines, the cascade falls through
+    /// to the default worker (stage 3). Confirms the cascade
+    /// shape doesn't swallow the prompt: a declining LLM
+    /// dispatcher must produce the same outcome as no LLM
+    /// dispatcher at all.
+    #[test]
+    fn cascade_falls_through_to_default_when_llm_declines() {
+        use crate::dispatcher::llm::testing::MockLlmBackend;
+        use crate::session::Session;
+        use crate::workers::WorkerRegistry;
+
+        let cfg = JarvisConfig::default();
+        let llm = Arc::new(LlmDispatcher::new(Box::new(MockLlmBackend::declining())));
+        let cascade = build_cascade(&cfg, Vec::new(), Some(llm));
+
+        let registry = WorkerRegistry::default();
+        let session = Session::new();
+        let decision = cascade
+            .dispatch("anything", &session, &registry)
+            .unwrap()
+            .expect("should fall through to default");
+        assert_eq!(
+            decision.worker_id, cfg.agent.name,
+            "stage 3 default worker claims the turn"
+        );
+    }
+
+    /// Same shape when stage 2's backend errors: cascade falls
+    /// through, default claims. Critical contract — a transient
+    /// classifier failure must not kill the turn.
+    #[test]
+    fn cascade_falls_through_to_default_when_llm_errors() {
+        use crate::dispatcher::llm::testing::MockLlmBackend;
+        use crate::session::Session;
+        use crate::workers::WorkerRegistry;
+
+        let cfg = JarvisConfig::default();
+        let llm = Arc::new(LlmDispatcher::new(Box::new(MockLlmBackend::failing(
+            "classifier down",
+        ))));
+        let cascade = build_cascade(&cfg, Vec::new(), Some(llm));
+
+        let registry = WorkerRegistry::default();
+        let session = Session::new();
+        let decision = cascade
+            .dispatch("anything", &session, &registry)
+            .unwrap()
+            .expect("must not propagate the backend error");
+        assert_eq!(decision.worker_id, cfg.agent.name);
     }
 }

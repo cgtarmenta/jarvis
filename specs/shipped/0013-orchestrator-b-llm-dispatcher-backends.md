@@ -1,10 +1,10 @@
 ---
 id: 0013
 title: Orchestrator B — LLM dispatcher backends
-status: active
+status: shipped
 owner: unassigned
 created: 2026-05-14
-shipped:
+shipped: 2026-05-14
 verifying:
 related:
 id: 
@@ -133,12 +133,19 @@ endpoint like Groq / Fireworks (best latency for the money).
       then swallows into stage-3 fallthrough — meeting the
       spec's "never kill the user's turn" invariant. *(Done
       in B-2/B-3; verified end-to-end in B-4.)*
-- [ ] Tests cover: trait dispatch with a mock backend; OzCli
-      backend invocation with a mock `oz` binary; OpenAiCompat
-      with a mock HTTP server; cascade integration showing
-      stage 2 being inserted/omitted by config presence;
-      timeout fallthrough; cache hit on repeated prompt;
-      malformed config startup behaviour.
+- [x] Tests cover: trait dispatch with a mock backend
+      *(B-1)*; OzCli backend invocation with a mock `oz`
+      binary *(B-3, via #!/bin/sh fixtures + TempDir)*;
+      OpenAiCompat with a mock HTTP server *(B-2, hand-rolled
+      TcpListener — no new deps)*; cascade integration
+      showing stage 2 being inserted/omitted by config
+      presence *(B-5, `pipeline::tests::cascade_has_*_stages_*`
+      + `try_build_llm_stage_*`)*; timeout fallthrough
+      *(B-2 + B-3 timeout tests, plus cascade-level
+      `cascade_falls_through_to_default_when_llm_errors` in
+      B-5)*; cache hit on repeated prompt *(B-4, multiple
+      cache-key tests)*; malformed config startup behaviour
+      *(B-4 + B-5 soft-fail tests). *(B-5, this commit.)*
 
 ## How
 
@@ -174,6 +181,26 @@ Out of scope:
 - Hot-swapping the backend without daemon restart.
 
 ## Journal
+
+- 2026-05-14: shipped.
+
+- 2026-05-14: shipped. Five slices: B-1 (trait, ecb28fe),
+  B-2 (HTTP backend, 741f2ca), B-3 (CLI subprocess, 65358d6),
+  B-4 (cascade + config + cache, 242c4b5), B-5 (E2E tests +
+  ship). 245 lib tests green; clippy + fmt clean.
+  Section name in user-facing config is
+  `[dispatcher.fallback]` (renamed from the spec's original
+  `[listener.fallback]` — more accurate to what it
+  configures). HTTP client is `ureq` (already a direct dep)
+  rather than the `reqwest` the spec mentioned. Two
+  out-of-scope items from the spec did NOT land and are left
+  to future work: (1) `~/.config/jarvis/dispatcher-prompt.txt`
+  override hook for the classifier prompt — the default
+  template ships hardcoded for now, users who want a custom
+  prompt template will need to wait for a follow-up spec;
+  (2) `OpenAiCompatBackend` startup ping to log endpoint
+  reachability — also deferred. Both are nice-to-have polish,
+  neither blocks the core feature.
 
 - 2026-05-14: promoted to active.
 
