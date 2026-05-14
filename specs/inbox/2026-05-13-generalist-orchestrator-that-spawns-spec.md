@@ -266,15 +266,34 @@ Dependency rules:
 - **B and E2 are independent of each other** and both land after A
   and E1 respectively.
 
-Status of children:
-- ✅ **shipped** `shipped/0008-orchestrator-c-worker-manifests-and-auto.md` (2026-05-14)
-- 📥 inbox  `inbox/2026-05-14-orchestrator-d-multi-worker-memory-schem.md`
-- 📥 inbox  `inbox/2026-05-14-orchestrator-a-dispatcher-trait-and-buil.md`
-- 📥 inbox  `inbox/2026-05-14-orchestrator-e1-task-registry-foundation.md`
-- 📥 inbox  `inbox/2026-05-14-orchestrator-b-llm-dispatcher-backends.md`
-- 📥 inbox  `inbox/2026-05-14-orchestrator-e2-voice-intents-over-task.md`
+Status of children — **all shipped 2026-05-14**:
+
+- ✅ `shipped/0008-orchestrator-c-worker-manifests-and-auto.md` — hija C
+- ✅ `shipped/0009-orchestrator-d-multi-worker-memory-schem.md` — hija D
+- ✅ `shipped/0010-orchestrator-a-dispatcher-trait-and-buil.md` — hija A
+- ✅ `shipped/0011-orchestrator-e1-task-registry-foundation.md` — hija E1
+- ✅ `shipped/0012-orchestrator-e2-voice-intents-over-task.md` — hija E2
+- ✅ `shipped/0013-orchestrator-b-llm-dispatcher-backends.md` — hija B
 
 ## Journal
+
+- 2026-05-14: **umbrella complete — all six children shipped.**
+  Final shipping order: C (0008) → D (0009) → A (0010) → E1
+  (0011) → E2 (0012) → B (0013). The orchestrator vision the
+  user named on 2026-05-13 is now the cascade running in
+  master: built-in handlers + optional LLM classifier +
+  default-worker fallthrough, with task registry + voice
+  surface + multi-worker memory schema underneath. Two
+  resolved-design items deliberately deferred to v2 and not
+  in any of the children: (1) multi-thread support (one
+  thread today; spec D's `active_workers` map is per-session
+  but only one session is live at a time), (2) plugin-style
+  worker handshake (`--describe`); manifest TOML is
+  sufficient for v1. Both are captured in the relevant
+  shipped spec journals.
+  This umbrella stays in `inbox/` per its own opening note —
+  it lives on as the canonical rationale reference, not as
+  open work.
 
 - 2026-05-14: hija C shipped (`0008`). The orchestrator's
   declarative foundation is now in master: worker manifests,
