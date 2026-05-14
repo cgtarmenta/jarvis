@@ -7,6 +7,7 @@
 
 use std::env;
 use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand};
@@ -133,6 +134,14 @@ enum Cmd {
         cmd: AgentCmd,
     },
 
+    /// Inspect / manage async tasks (spec 0011 / orchestrator E1).
+    /// `jarvis task list` shows active tasks by default; `show`,
+    /// `cancel`, `clean` operate on a specific task by id-prefix.
+    Task {
+        #[command(subcommand)]
+        cmd: TaskCmd,
+    },
+
     /// Inspect the worker registry — every manifest under
     /// `~/.config/jarvis/workers/` plus any built-in handlers, with
     /// their status (active or disabled with reason). Spec 0008 ships
@@ -159,6 +168,35 @@ enum Cmd {
         /// Override `[wake].phrases` for this run only. Comma-separated.
         #[arg(long)]
         phrases: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TaskCmd {
+    /// List tasks. Active-only by default; `--all` includes
+    /// terminal-status records (completed/failed/cancelled/orphaned).
+    List {
+        #[arg(long)]
+        all: bool,
+    },
+    /// Print full record for a task. Accepts an unambiguous
+    /// id-prefix (so you can type `t-1715` instead of the full
+    /// 25-character id).
+    Show {
+        /// Task id or prefix.
+        id: String,
+    },
+    /// Send SIGTERM to a running task and mark it cancelled.
+    Cancel {
+        /// Task id or prefix.
+        id: String,
+    },
+    /// Prune terminal-status tasks older than the given duration.
+    /// Default `7d`. Active (Running) tasks are never pruned.
+    Clean {
+        /// Maximum age to keep, e.g. `7d`, `24h`, `30m`, `60s`.
+        #[arg(long, default_value = "7d")]
+        older_than: String,
     },
 }
 
@@ -290,6 +328,7 @@ pub fn run() -> Result<()> {
         Cmd::Spec { cmd } => cmd_spec(cmd),
         Cmd::Agent { cmd } => cmd_agent(&cfg, cmd),
         Cmd::Worker { cmd } => cmd_worker(cmd, &cfg),
+        Cmd::Task { cmd } => cmd_task(cmd),
         Cmd::TestWake {
             seconds,
             threshold,
@@ -1298,5 +1337,432 @@ mod tests {
         // Disabled worker details.
         assert!(text.contains("  broken"));
         assert!(text.contains("not found on PATH"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Task subcommands (spec 0011 / orchestrator E1)
+// ---------------------------------------------------------------------------
+
+fn cmd_task(cmd: TaskCmd) -> Result<()> {
+    use crate::tasks::TaskRegistry;
+    let dir = TaskRegistry::default_dir()?;
+    match cmd {
+        TaskCmd::List { all } => {
+            let reg = TaskRegistry::load_from_dir(&dir);
+            print!("{}", format_task_list(&dir, &reg, all));
+            Ok(())
+        }
+        TaskCmd::Show { id } => {
+            let reg = TaskRegistry::load_from_dir(&dir);
+            match reg.find_by_prefix(&id)? {
+                None => Err(anyhow!("no task matches prefix {id:?}")),
+                Some(task) => {
+                    print!("{}", format_task_detail(&dir, task));
+                    Ok(())
+                }
+            }
+        }
+        TaskCmd::Cancel { id } => cmd_task_cancel(&dir, &id),
+        TaskCmd::Clean { older_than } => {
+            let max_age = parse_duration(&older_than)?;
+            let removed = clean_old_tasks(&dir, max_age)?;
+            println!("✓ pruned {removed} terminal task(s) older than {older_than}");
+            Ok(())
+        }
+    }
+}
+
+/// Cancel a running task. The flow is:
+///   1. Resolve the task by prefix (must be running).
+///   2. Set `status = Cancelled` on disk so the supervisor
+///      thread doesn't overwrite our intent when it observes
+///      the non-zero exit caused by SIGTERM.
+///   3. Send SIGTERM to the child PID.
+///   4. The supervisor catches the exit, re-reads the on-disk
+///      record, sees `Cancelled`, and keeps it. The user gets
+///      an OS notification once the child actually dies.
+fn cmd_task_cancel(dir: &Path, id_prefix: &str) -> Result<()> {
+    use crate::tasks::TaskRegistry;
+    let reg = TaskRegistry::load_from_dir(dir);
+    let task = reg
+        .find_by_prefix(id_prefix)?
+        .ok_or_else(|| anyhow!("no task matches prefix {id_prefix:?}"))?;
+    if task.status != crate::tasks::TaskStatus::Running {
+        return Err(anyhow!(
+            "task {} is not running (status = {:?})",
+            task.id,
+            task.status
+        ));
+    }
+    let pid = task
+        .pid
+        .ok_or_else(|| anyhow!("task {} is Running but has no recorded pid", task.id))?;
+
+    let mut updated = task.clone();
+    updated.status = crate::tasks::TaskStatus::Cancelled;
+    updated.save(dir)
+        .with_context(|| format!("persisting Cancelled state for task {}", updated.id))?;
+
+    #[cfg(unix)]
+    let signal_result = unsafe {
+        let r = libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        if r == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+    };
+    #[cfg(not(unix))]
+    let signal_result: std::io::Result<()> = Err(std::io::Error::other("non-unix cancel"));
+
+    match signal_result {
+        Ok(()) => {
+            println!("✓ SIGTERM sent to task {} (pid {pid})", updated.id);
+            Ok(())
+        }
+        Err(e) => Err(anyhow!(
+            "could not signal task {} (pid {pid}): {e}",
+            updated.id
+        )),
+    }
+}
+
+fn clean_old_tasks(dir: &Path, max_age: Duration) -> Result<usize> {
+    use crate::tasks::{TaskRegistry, TaskStatus};
+    let reg = TaskRegistry::load_from_dir(dir);
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut removed = 0;
+    for task in reg.all() {
+        if task.status == TaskStatus::Running {
+            continue;
+        }
+        let completion = task.completion_time.unwrap_or(task.spawn_time);
+        let age_secs = now_secs.saturating_sub(completion);
+        if Duration::from_secs(age_secs) >= max_age {
+            let task_dir = task.dir(dir);
+            if let Err(e) = std::fs::remove_dir_all(&task_dir) {
+                tracing::warn!(
+                    task_id = %task.id,
+                    error = %e,
+                    "failed to remove task dir during clean"
+                );
+            } else {
+                removed += 1;
+            }
+        }
+    }
+    Ok(removed)
+}
+
+/// Build the text of `jarvis task list`. Pure function so it
+/// can be unit-tested without touching the filesystem.
+fn format_task_list(
+    dir: &Path,
+    registry: &crate::tasks::TaskRegistry,
+    include_terminal: bool,
+) -> String {
+    use std::fmt::Write as _;
+    use crate::tasks::TaskStatus;
+    let mut out = String::new();
+    writeln!(out, "Tasks directory: {}", dir.display()).unwrap();
+    let total = registry.all().len();
+    let active = registry.active().count();
+    writeln!(out, "Active: {active}    Total: {total}").unwrap();
+    writeln!(out).unwrap();
+
+    // Newest first so users see what they just spawned at the top.
+    let mut tasks: Vec<_> = registry.all().iter().collect();
+    tasks.sort_by(|a, b| b.spawn_time.cmp(&a.spawn_time));
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let mut shown = 0usize;
+    for task in tasks {
+        if !include_terminal && task.status != TaskStatus::Running {
+            continue;
+        }
+        shown += 1;
+        let age = humanise_age(now.saturating_sub(task.spawn_time));
+        let short_id = task.id.split('-').next_back().unwrap_or(&task.id);
+        let intent: String = task.user_intent.chars().take(60).collect();
+        let suffix = if task.user_intent.chars().count() > 60 {
+            "…"
+        } else {
+            ""
+        };
+        writeln!(
+            out,
+            "  {short:<10}  {status:<10}  {worker:<14}  {age:<8}  {intent}{suffix}",
+            short = short_id,
+            status = format!("{:?}", task.status).to_lowercase(),
+            worker = task.worker_id,
+            age = age,
+            intent = intent,
+            suffix = suffix,
+        )
+        .unwrap();
+    }
+    if shown == 0 {
+        let hint = if include_terminal {
+            "no tasks in the registry yet"
+        } else {
+            "no active tasks (use --all to see completed/failed)"
+        };
+        writeln!(out, "  ({hint})").unwrap();
+    }
+    out
+}
+
+fn format_task_detail(dir: &Path, task: &crate::tasks::Task) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    writeln!(out, "Task: {}", task.id).unwrap();
+    writeln!(out, "  worker:           {}", task.worker_id).unwrap();
+    writeln!(out, "  status:           {:?}", task.status).unwrap();
+    writeln!(out, "  thread:           {}", task.thread_id).unwrap();
+    writeln!(out, "  spawned at:       {}", task.spawn_time).unwrap();
+    if let Some(t) = task.completion_time {
+        writeln!(out, "  completed at:     {t}").unwrap();
+    }
+    if let Some(pid) = task.pid {
+        writeln!(out, "  pid (alive):      {pid}").unwrap();
+    }
+    if let Some(code) = task.exit_code {
+        writeln!(out, "  exit code:        {code}").unwrap();
+    }
+    writeln!(out, "  user intent:      {}", task.user_intent).unwrap();
+    writeln!(out, "  command:          {}", task.command.join(" ")).unwrap();
+    if let Some(summary) = &task.summary {
+        writeln!(out).unwrap();
+        writeln!(out, "summary:").unwrap();
+        for line in summary.lines() {
+            writeln!(out, "  {line}").unwrap();
+        }
+    }
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "Full output at:\n  {}\n  {}",
+        task.stdout_path(dir).display(),
+        task.stderr_path(dir).display(),
+    )
+    .unwrap();
+    out
+}
+
+/// Parse a duration string like `7d`, `24h`, `30m`, `60s`. Only
+/// single-unit strings are supported; that covers everything the
+/// `--older-than` flag realistically wants.
+fn parse_duration(s: &str) -> Result<Duration> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("empty duration"));
+    }
+    let (num_part, unit) = trimmed.split_at(trimmed.len() - 1);
+    let n: u64 = num_part
+        .parse()
+        .with_context(|| format!("parsing number in duration {trimmed:?}"))?;
+    let secs = match unit {
+        "s" => n,
+        "m" => n.saturating_mul(60),
+        "h" => n.saturating_mul(60 * 60),
+        "d" => n.saturating_mul(60 * 60 * 24),
+        _ => {
+            return Err(anyhow!(
+                "unknown duration unit {unit:?} in {trimmed:?} (expected s/m/h/d)"
+            ));
+        }
+    };
+    Ok(Duration::from_secs(secs))
+}
+
+/// "5s", "3m", "2h", "1d 4h" — short relative ages for the
+/// task list view. Skips zero components so we don't show
+/// "0d 0h 5m".
+fn humanise_age(secs: u64) -> String {
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    if secs < 3600 {
+        return format!("{}m", secs / 60);
+    }
+    if secs < 86_400 {
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        if m == 0 {
+            return format!("{h}h");
+        }
+        return format!("{h}h {m}m");
+    }
+    let d = secs / 86_400;
+    let h = (secs % 86_400) / 3600;
+    if h == 0 {
+        format!("{d}d")
+    } else {
+        format!("{d}d {h}h")
+    }
+}
+
+#[cfg(test)]
+mod task_tests {
+    use super::*;
+    use crate::tasks::{Task, TaskRegistry, TaskStatus};
+
+    fn record(id: &str, status: TaskStatus, spawn: u64) -> Task {
+        Task {
+            id: id.to_string(),
+            thread_id: "test".to_string(),
+            worker_id: "gemini".to_string(),
+            spawn_time: spawn,
+            completion_time: None,
+            status,
+            user_intent: "analyze this log file".to_string(),
+            command: vec!["gemini-cli".to_string(), "--prompt".to_string()],
+            pid: None,
+            exit_code: None,
+            summary: None,
+        }
+    }
+
+    /// `parse_duration` accepts the documented units and rejects
+    /// junk. Backs the `--older-than` flag.
+    #[test]
+    fn parse_duration_units() {
+        assert_eq!(parse_duration("30s").unwrap(), Duration::from_secs(30));
+        assert_eq!(parse_duration("5m").unwrap(), Duration::from_secs(300));
+        assert_eq!(parse_duration("2h").unwrap(), Duration::from_secs(7200));
+        assert_eq!(parse_duration("7d").unwrap(), Duration::from_secs(604_800));
+        assert!(parse_duration("").is_err());
+        assert!(parse_duration("abc").is_err());
+        assert!(parse_duration("5x").is_err());
+    }
+
+    /// `humanise_age` produces the short relative forms used by
+    /// the list view.
+    #[test]
+    fn humanise_age_brackets() {
+        assert_eq!(humanise_age(0), "0s");
+        assert_eq!(humanise_age(45), "45s");
+        assert_eq!(humanise_age(60), "1m");
+        assert_eq!(humanise_age(120), "2m");
+        assert_eq!(humanise_age(3600), "1h");
+        assert_eq!(humanise_age(3660), "1h 1m");
+        assert_eq!(humanise_age(86_400), "1d");
+        assert_eq!(humanise_age(90_000), "1d 1h");
+    }
+
+    /// Empty registry → list view shows the "no tasks" hint.
+    #[test]
+    fn format_list_empty() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let reg = TaskRegistry::load_from_dir(tmp.path());
+        let text = format_task_list(tmp.path(), &reg, false);
+        assert!(text.contains("Active: 0"));
+        assert!(text.contains("no active tasks"));
+
+        let text_all = format_task_list(tmp.path(), &reg, true);
+        assert!(text_all.contains("no tasks in the registry yet"));
+    }
+
+    /// List view excludes terminal tasks by default, includes
+    /// them under --all. Headers + per-row formatting check.
+    #[test]
+    fn format_list_filters_by_status() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        record("t-1700000000-aaaaaa", TaskStatus::Completed, now - 100)
+            .save(tmp.path())
+            .unwrap();
+        record("t-1700000001-bbbbbb", TaskStatus::Running, now - 5)
+            .save(tmp.path())
+            .unwrap();
+        let reg = TaskRegistry::load_from_dir(tmp.path());
+
+        // Default: only Running shown.
+        let active_view = format_task_list(tmp.path(), &reg, false);
+        assert!(active_view.contains("bbbbbb"), "running task visible");
+        assert!(
+            !active_view.contains("aaaaaa"),
+            "completed task hidden by default: {active_view}"
+        );
+
+        // --all: both shown.
+        let all_view = format_task_list(tmp.path(), &reg, true);
+        assert!(all_view.contains("aaaaaa"));
+        assert!(all_view.contains("bbbbbb"));
+    }
+
+    /// Detail view names every field that backs the spec's
+    /// `jarvis task show` bullet. Locking the shape so a refactor
+    /// doesn't silently drop a column.
+    #[test]
+    fn format_detail_includes_all_metadata() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut t = record("t-1700000000-abc123", TaskStatus::Completed, 1_700_000_000);
+        t.completion_time = Some(1_700_000_100);
+        t.exit_code = Some(0);
+        t.summary = Some("found 3 errors\nin syslog".to_string());
+        let text = format_task_detail(tmp.path(), &t);
+        for needle in [
+            "t-1700000000-abc123",
+            "worker:",
+            "gemini",
+            "status:",
+            "Completed",
+            "user intent:",
+            "analyze this log file",
+            "command:",
+            "gemini-cli --prompt",
+            "exit code:",
+            "summary:",
+            "found 3 errors",
+            "in syslog",
+            "Full output at:",
+            "stdout.txt",
+            "stderr.txt",
+        ] {
+            assert!(
+                text.contains(needle),
+                "missing {:?} in detail view:\n{text}",
+                needle
+            );
+        }
+    }
+
+    /// `clean_old_tasks` removes terminal-status tasks older than
+    /// the threshold and leaves Running ones alone.
+    #[test]
+    fn clean_drops_old_terminal_tasks() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let mut old = record("t-old-aaaa", TaskStatus::Completed, now - 10_000);
+        old.completion_time = Some(now - 10_000);
+        old.save(tmp.path()).unwrap();
+
+        let mut recent = record("t-recent-bbbb", TaskStatus::Completed, now - 5);
+        recent.completion_time = Some(now - 5);
+        recent.save(tmp.path()).unwrap();
+
+        let running = record("t-running-cccc", TaskStatus::Running, now - 9_999);
+        running.save(tmp.path()).unwrap();
+
+        // Prune everything older than 1 hour.
+        let removed = clean_old_tasks(tmp.path(), Duration::from_secs(3600)).unwrap();
+        assert_eq!(removed, 1, "only the 10000s-old terminal task is removed");
+
+        // Verify on disk.
+        assert!(!tmp.path().join("t-old-aaaa").exists());
+        assert!(tmp.path().join("t-recent-bbbb").exists());
+        assert!(tmp.path().join("t-running-cccc").exists());
     }
 }

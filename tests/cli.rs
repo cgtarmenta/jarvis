@@ -56,6 +56,74 @@ fn doctor_runs_without_crashing() {
         .stdout(contains("Jarvis doctor"));
 }
 
+/// Spec 0011 (orchestrator E1-4): `jarvis task list` finds tasks
+/// in the cache dir, separates active from terminal via the
+/// `--all` flag, and `task show` resolves an id prefix to print
+/// the full record. We seed a v2 task record into the tempdir
+/// cache and assert the CLI output names the right pieces.
+#[test]
+#[serial]
+fn task_list_and_show_render_records() {
+    use std::fs;
+    let tmp = TempDir::new().unwrap();
+    let tasks_dir = tmp.path().join("cache").join("jarvis").join("tasks");
+    fs::create_dir_all(&tasks_dir).unwrap();
+    let task_id = "t-1715700000-aabbcc";
+    let task_dir = tasks_dir.join(task_id);
+    fs::create_dir_all(&task_dir).unwrap();
+    fs::write(
+        task_dir.join("record.json"),
+        r#"{
+            "id": "t-1715700000-aabbcc",
+            "thread_id": "s-test",
+            "worker_id": "gemini",
+            "spawn_time": 1715700000,
+            "completion_time": 1715700060,
+            "status": "completed",
+            "user_intent": "analyze syslog and summarise errors",
+            "command": ["gemini-cli", "--prompt", "analyze syslog"],
+            "pid": null,
+            "exit_code": 0,
+            "summary": "found 3 errors at startup"
+        }"#,
+    )
+    .unwrap();
+    fs::write(task_dir.join("stdout.txt"), "found 3 errors at startup").unwrap();
+    fs::write(task_dir.join("stderr.txt"), "").unwrap();
+
+    // task list (no --all) hides the completed task.
+    redirect_xdg(jarvis().args(["task", "list"]), &tmp)
+        .assert()
+        .success()
+        .stdout(contains("Total: 1"))
+        .stdout(contains("no active tasks"));
+
+    // task list --all surfaces it.
+    redirect_xdg(jarvis().args(["task", "list", "--all"]), &tmp)
+        .assert()
+        .success()
+        .stdout(contains("aabbcc"))
+        .stdout(contains("gemini"))
+        .stdout(contains("completed"));
+
+    // task show by prefix.
+    redirect_xdg(jarvis().args(["task", "show", "t-1715700000"]), &tmp)
+        .assert()
+        .success()
+        .stdout(contains("worker:"))
+        .stdout(contains("status:"))
+        .stdout(contains("Completed"))
+        .stdout(contains("analyze syslog"))
+        .stdout(contains("summary:"))
+        .stdout(contains("found 3 errors"))
+        .stdout(contains("stdout.txt"));
+
+    // task show with a non-matching prefix errors.
+    redirect_xdg(jarvis().args(["task", "show", "t-9999"]), &tmp)
+        .assert()
+        .failure();
+}
+
 /// Spec 0009 (orchestrator D-3): `jarvis session show` renders the
 /// new v2 fields — `session_schema_version`, the `active_workers`
 /// map, and per-turn `dispatched_to` — when a v2 session is on
