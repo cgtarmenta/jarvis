@@ -122,6 +122,47 @@ pub fn register_builtins(
 mod tests {
     use super::*;
 
+    /// Spec 0012 / E2 smoke: the four task-voice intents route
+    /// to their handlers when the cascade is assembled the
+    /// same way the pipeline does. Locking the routing
+    /// behaviour so a future trigger-phrase tweak doesn't
+    /// silently steal one of these prompts.
+    #[test]
+    fn task_voice_intents_route_through_cascade() {
+        use crate::dispatcher::{
+            BuiltinIntentDispatcher, CascadeDispatcher, DefaultWorkerDispatcher, Dispatcher,
+        };
+        use crate::session::Session;
+
+        let cfg = JarvisConfig::default();
+        let mut registry = WorkerRegistry::default();
+        let matchers = register_builtins(&mut registry, &cfg);
+        let cascade = CascadeDispatcher::new()
+            .push(Box::new(BuiltinIntentDispatcher::from_matchers(matchers)))
+            .push(Box::new(DefaultWorkerDispatcher::new("claude")));
+        let session = Session::new();
+
+        for (prompt, expected) in [
+            ("¿qué tareas tengo?", "task-list"),
+            ("muéstrame el resultado del análisis", "task-show"),
+            ("qué dijo gemini", "task-show"),
+            ("cancela esa tarea", "task-cancel"),
+            ("para la tarea de claude", "task-cancel"),
+            ("limpia las tareas viejas", "task-clean"),
+            ("purge tasks", "task-clean"),
+        ] {
+            let d = cascade
+                .dispatch(prompt, &session, &registry)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                d.worker_id, expected,
+                "prompt {prompt:?} should route to {expected:?}, got {:?}",
+                d.worker_id
+            );
+        }
+    }
+
     /// End-to-end smoke for the spec 0010 cascade: a few
     /// representative prompts get routed to the right worker
     /// through the same composition the pipeline assembles. The

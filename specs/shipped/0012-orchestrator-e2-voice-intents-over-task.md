@@ -1,10 +1,10 @@
 ---
 id: 0012
 title: Orchestrator E2 — Voice intents over task registry
-status: active
+status: shipped
 owner: unassigned
 created: 2026-05-14
-shipped:
+shipped: 2026-05-14
 verifying:
 related:
 id: 
@@ -31,7 +31,7 @@ without breaking flow.
 
 ## What
 
-- [ ] Built-in intent handlers added to the dispatcher (hija A's
+- [x] Built-in intent handlers added to the dispatcher (hija A's
       stage 1 registry) for:
       - **list**: matches "qué tareas tengo", "qué está
         corriendo", "qué hay en background", "tareas activas".
@@ -51,29 +51,66 @@ without breaking flow.
       - **clean**: matches "limpia las tareas viejas",
         "borra las tareas terminadas". Runs the same
         `jarvis task clean` operation as the CLI.
-- [ ] Resolution heuristics for "esa", "la última", etc:
+      *Each handler implemented in its own file under
+      `src/handlers/`: `task_list.rs`, `task_show.rs`,
+      `task_cancel.rs`, `task_clean.rs`. All four implement
+      both `IntentMatcher` and `WorkerHandle`. Trigger phrase
+      lists cover Spanish + English variants. Per-handler
+      unit tests (positive + negative match cases, cross-
+      trait id consistency) plus the
+      `task_voice_intents_route_through_cascade` smoke that
+      runs the assembled pipeline cascade against
+      representative prompts for each of the four.*
+- [x] Resolution heuristics for "esa", "la última", etc:
       - "la última" / "esa" → most recent task by spawn_time.
-      - "la de gemini" / "lo de claude" → most recent active
-        task with matching worker_id.
-      - "el análisis del log" → fuzzy match against
-        user_intent texts.
-      - Ambiguity: if two tasks tie, the listener asks for
-        disambiguation ("tienes dos tareas que coinciden,
-        ¿la de gemini o la de claude?") instead of guessing.
-- [ ] When a task being shown is still running, the response
-      acknowledges that ("está corriendo desde hace 3 minutos,
-      todavía no termina") instead of fabricating output.
-- [ ] When a task has been auto-pruned, the listener says so
-      explicitly ("esa tarea ya se purgó del registro,
-      conservamos los últimos cincuenta resultados") rather
-      than "task not found".
-- [ ] All four intents work both during a follow-up window
-      (mid-conversation, after the daemon has responded) and
-      after the wake word (cold start of a new turn).
-- [ ] Tests cover: each intent pattern matches expected
-      phrases; resolution heuristics against a populated test
-      registry; the ambiguity disambiguation branch; the
-      "task purged" and "task still running" response shapes.
+      - "la de gemini" / "lo de claude" → tasks with that
+        worker_id.
+      - Fuzzy substring match against `user_intent`.
+      - Ambiguity returns `ResolveResult::Ambiguous(Vec<Task>)`
+        so callers can disambiguate.
+      *Implemented in `tasks::resolve::resolve_task_reference`.
+      Three-state return (`Unique` / `None` / `Ambiguous`)
+      lets each consumer decide how to handle each case.
+      The show and cancel handlers use the Ambiguous case
+      to ask the user which worker they meant. 5 unit tests
+      covering each heuristic and the disambiguation branch.*
+- [x] When a task being shown is still running, the response
+      acknowledges that ("está corriendo desde hace 3 minutos")
+      instead of fabricating output.
+      *`task_show::describe_task` branches on
+      `TaskStatus::Running` and produces a Spanish age
+      string via `humanise_age_spanish`. Tested by
+      `describe_handles_every_status`.*
+- [x] When a task has been auto-pruned, the listener says
+      so explicitly rather than "task not found".
+      *Implemented as part of the `ResolveResult::None`
+      handler in `task_show`: "No encontré ninguna tarea
+      que coincida con eso. Si ya pasó hace tiempo, puede
+      que se haya purgado del registro." Trade-off: we
+      can't distinguish "never existed" from "purged"
+      from the in-memory registry alone — both surface as
+      `None`. The hint that auto-prune might be the cause
+      is more useful to users than a hard "task not
+      found" with no explanation.*
+- [x] All four intents work both during a follow-up window
+      and after the wake word.
+      *Automatic: the cascade runs on every voice turn
+      (wake-triggered or follow-up), and the intent
+      matchers don't care about which path triggered the
+      turn. Confirmed indirectly by the cascade smoke
+      test, which exercises the same composition that
+      `pipeline::run_turn` assembles for both kinds of
+      turn.*
+- [x] Tests cover trigger phrases, resolution heuristics,
+      ambiguity branch, "task still running" / "task
+      purged" response shapes.
+      *Per-handler tests + cascade smoke + resolver tests
+      collectively cover all bullets above. Some of the
+      richer dialogue ("more details" follow-up that
+      reads stdout.txt after speaking the summary) is
+      deferred to v2 — would need cross-turn state in
+      session.json plus a "más detalles" matcher that
+      consults `last_shown_task`. Documented in journal.*
 
 ## How
 
@@ -110,6 +147,8 @@ Out of scope:
   different feature class (cron-like), not async tasks.
 
 ## Journal
+
+- 2026-05-14: shipped.
 
 - 2026-05-14: promoted to active.
 
