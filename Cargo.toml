@@ -65,6 +65,7 @@ portable-pty = "0.9.0"
 chrono = { version = "0.4.44", default-features = false, features = ["clock", "std"] }
 chrono-tz = { version = "0.10.4", default-features = false }
 evalexpr = "13.1.0"
+notify-rust = "4.17.0"
 
 # Used to send SIGTERM to recorder subprocesses on timeout (parecord and
 # pw-record have no `--duration` flag, so we kill them ourselves).

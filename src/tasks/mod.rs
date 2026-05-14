@@ -10,6 +10,8 @@
 
 pub mod record;
 pub mod registry;
+pub mod spawn;
 
 pub use record::{Task, TaskStatus, task_id};
 pub use registry::TaskRegistry;
+pub use spawn::spawn_async_task;

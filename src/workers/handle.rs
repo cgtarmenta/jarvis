@@ -84,6 +84,18 @@ pub trait WorkerHandle: Send + Sync {
     /// Run the worker once and return its reply (plus any captured
     /// session id). Synchronous; async invocation lives in hija E1.
     fn invoke(&self, ctx: &WorkerInvocation<'_>) -> Result<WorkerResponse>;
+
+    /// If this worker can be spawned as a detached background
+    /// process (per spec 0011 / E1's async-task workflow), return
+    /// the argv to use. Built-in handlers run in-process and
+    /// return `None`; manifest-loaded workers return `Some(argv)`
+    /// only when their manifest set `async_eligible = true`.
+    ///
+    /// The default impl returns `None` so every existing
+    /// `WorkerHandle` is sync-only without further changes.
+    fn detachable_argv(&self, _ctx: &WorkerInvocation<'_>) -> Option<Vec<String>> {
+        None
+    }
 }
 
 /// `WorkerHandle` impl for an externally-defined manifest worker. Wraps
@@ -152,20 +164,20 @@ impl WorkerHandle for ManifestWorker {
         Some(&self.source)
     }
 
-    fn invoke(&self, ctx: &WorkerInvocation<'_>) -> Result<WorkerResponse> {
-        let mut values: HashMap<&str, &str> = HashMap::new();
-        values.insert("prompt", ctx.prompt);
-        if let Some(sid) = ctx.session_id {
-            values.insert("session_id", sid);
+    fn detachable_argv(&self, ctx: &WorkerInvocation<'_>) -> Option<Vec<String>> {
+        // Only manifests with `async_eligible = true` are spawnable
+        // as background tasks. The pipeline's trigger-phrase
+        // detection (E1-5) also has to match before this is
+        // called, so non-async-eligible workers stay sync even if
+        // the user appends "avísame cuando termine".
+        if !self.manifest.async_eligible {
+            return None;
         }
-        if let Some(cwd) = ctx.cwd {
-            values.insert("cwd", cwd);
-        }
+        Some(self.build_argv(ctx))
+    }
 
-        // initial_command applies when the worker is stateful AND we
-        // don't yet have a session id to resume from.
-        let for_initial = self.manifest.stateful && ctx.session_id.is_none();
-        let argv = self.manifest.build_command(&values, for_initial);
+    fn invoke(&self, ctx: &WorkerInvocation<'_>) -> Result<WorkerResponse> {
+        let argv = self.build_argv(ctx);
 
         // `{prompt}` may live in argv (workers like `oz agent run
         // --prompt "..."`) or be expected on stdin (the way `claude
@@ -173,6 +185,7 @@ impl WorkerHandle for ManifestWorker {
         // chosen template *before* substitution; if `{prompt}` was in
         // the template, the prompt is in argv and we close stdin to
         // avoid confusing workers that detect terminal-vs-pipe input.
+        let for_initial = self.manifest.stateful && ctx.session_id.is_none();
         let template = if for_initial
             && self
                 .manifest
@@ -391,6 +404,24 @@ impl ManifestWorker {
 }
 
 impl ManifestWorker {
+    /// Build the argv vector for this invocation. Shared between
+    /// the synchronous `invoke` path and E1's
+    /// `detachable_argv` so both routes substitute placeholders
+    /// identically and pick `initial_command` vs `command` the
+    /// same way.
+    fn build_argv(&self, ctx: &WorkerInvocation<'_>) -> Vec<String> {
+        let mut values: HashMap<&str, &str> = HashMap::new();
+        values.insert("prompt", ctx.prompt);
+        if let Some(sid) = ctx.session_id {
+            values.insert("session_id", sid);
+        }
+        if let Some(cwd) = ctx.cwd {
+            values.insert("cwd", cwd);
+        }
+        let for_initial = self.manifest.stateful && ctx.session_id.is_none();
+        self.manifest.build_command(&values, for_initial)
+    }
+
     fn extract_session_id(&self, stdout: &[u8], stderr: &[u8]) -> Option<String> {
         let cap = self.manifest.session_id_capture.as_ref()?;
         let regex = self.capture_regex.as_ref()?;
