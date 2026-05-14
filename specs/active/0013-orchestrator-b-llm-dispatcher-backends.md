@@ -1,15 +1,14 @@
 ---
-id:
+id: 0013
 title: Orchestrator B — LLM dispatcher backends
-status: inbox
+status: active
 owner: unassigned
 created: 2026-05-14
 shipped:
 verifying:
 related:
-  - inbox/2026-05-13-generalist-orchestrator-that-spawns-spec.md
-  - inbox/2026-05-14-orchestrator-c-worker-manifests-and-auto.md
-  - inbox/2026-05-14-orchestrator-a-dispatcher-trait-and-buil.md
+id: 
+shipped: 
 ---
 
 # Orchestrator B — LLM dispatcher backends
@@ -142,6 +141,8 @@ Out of scope:
 - Hot-swapping the backend without daemon restart.
 
 ## Journal
+
+- 2026-05-14: promoted to active.
 
 - 2026-05-14: opened. Blocks on hija A (cascade slot must
   exist) and hija C (workers need `dispatch_hint`). The user

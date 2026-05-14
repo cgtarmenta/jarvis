@@ -11,12 +11,16 @@
 //!    the configured default worker (`cfg.agent.name`) with the
 //!    prompt verbatim. The last-resort match.
 //!
-//! Today only stages 1 and 3 are wired; stage 2 is a slot reserved
-//! for hija B.
+//! Spec 0013 (orchestrator B) fills the stage-2 slot: the
+//! [`llm::LlmBackend`] trait and its concrete backends live in
+//! [`llm`] and are wired into a [`Dispatcher`] adapter by the
+//! pipeline only when `[listener.fallback]` is configured. Without
+//! that config block the cascade reverts to the stages-1-and-3 shape.
 
 pub mod cascade;
 pub mod default;
 pub mod intent;
+pub mod llm;
 
 use anyhow::Result;
 
@@ -26,6 +30,7 @@ use crate::workers::WorkerRegistry;
 pub use cascade::CascadeDispatcher;
 pub use default::DefaultWorkerDispatcher;
 pub use intent::{BuiltinIntentDispatcher, IntentMatcher};
+pub use llm::{LlmBackend, WorkerInfo, default_classifier_prompt, parse_worker_id};
 
 /// The dispatcher's decision for a single turn.
 ///
