@@ -88,34 +88,51 @@ endpoint like Groq / Fireworks (best latency for the money).
       plain-string and array-of-parts content shapes so
       multimodal-extended vLLM/Triton builds work out of
       the box. *(B-2, shipped this commit.)*
-- [ ] Config schema in `config.toml`:
+- [x] Config schema in `config.toml`:
       ```
-      [listener.fallback]
+      [dispatcher.fallback]
       backend = "oz" | "openai_compat"
       model = "..."
       # backend-specific fields
       ```
-      If `[listener.fallback]` is absent, stage 2 is skipped
-      (zero behavior change from a pure-A install). If
-      `[listener.fallback]` is malformed at startup, the daemon
-      logs a warning, disables stage 2, and starts normally
-      (no crash on bad config).
-- [ ] Cascade integration: `CascadeDispatcher` (from hija A)
-      gains a stage-2 slot. If the slot is empty, the cascade
-      behaves exactly as v1 of hija A. If filled, an unmatched
-      stage-1 prompt is passed to the LLM backend, whose
-      result enters stage 3 as a `DispatchDecision`. If the
-      LLM backend errors (timeout, network, malformed
-      response), stage 3 takes over with the default worker.
-      *Never* let a dispatcher error kill the user's turn.
-- [ ] Caching: identical prompts within a 60-second window
-      bypass the LLM call and reuse the cached decision. Cache
-      is in-memory, per-thread. Keeps cost down on repeated
-      questions and is essentially free to implement.
-- [ ] Timeout: backend calls have a per-call timeout (default
-      5s, configurable). On timeout, fall through to stage 3
-      with a debug log entry. No retry on timeout — speed
-      matters more than precision here.
+      *(Section renamed `[dispatcher.fallback]` rather than
+      `[listener.fallback]` — the dispatcher cascade is the
+      module this actually configures; the spec's original name
+      was placeholder.)*
+      Absent → stage 2 skipped (zero behavior change from a
+      pure-A install). Malformed → daemon logs a WARN, disables
+      stage 2, starts normally. Implementation stores the raw
+      `toml::Value` in `JarvisConfig` and validates only at
+      pipeline init via `build_llm_stage`, so a typed-parse
+      failure can't take the daemon down. *(B-4, shipped this
+      commit.)*
+- [x] Cascade integration: `CascadeDispatcher` gains an
+      optional stage-2 LLM dispatcher (`LlmDispatcher` adapter).
+      If absent, the cascade is the v1 two-stage shape; if
+      present, unmatched stage-1 prompts go through the
+      backend, with results validated against the live worker
+      registry (hallucinated ids become declines). Backend
+      errors (`Err`) and unknown ids both log at WARN and
+      return `Ok(None)` so the cascade falls through to
+      stage 3. Never propagates a dispatch failure. *(B-4.)*
+- [x] Caching: in-memory `Mutex<HashMap<(prompt, sorted(worker_ids))
+      , (worker_id, cached_at)>>` with 60s TTL. Both picks AND
+      declines get cached (the LLM call is what's expensive,
+      not the decision). Worker-id list in the key is sorted
+      so registry insertion order doesn't cause spurious
+      misses. Hard cap of 1024 entries with oldest-25%
+      eviction. Backend errors are *not* cached so a transient
+      hiccup doesn't lock out for 60s. The dispatcher lives
+      behind a process-wide `OnceLock` in the pipeline so the
+      cache survives across turns. *(B-4.)*
+- [x] Timeout: per-backend (5s default, configurable via
+      `timeout_secs`). `OpenAiCompatBackend` uses
+      `ureq::Agent::timeout`; `OzCliBackend` uses a watchdog
+      thread that SIGTERMs the process group. Timeout
+      surfaces as `Err` from the backend which the adapter
+      then swallows into stage-3 fallthrough — meeting the
+      spec's "never kill the user's turn" invariant. *(Done
+      in B-2/B-3; verified end-to-end in B-4.)*
 - [ ] Tests cover: trait dispatch with a mock backend; OzCli
       backend invocation with a mock `oz` binary; OpenAiCompat
       with a mock HTTP server; cascade integration showing

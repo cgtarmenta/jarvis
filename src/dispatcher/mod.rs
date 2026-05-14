@@ -31,8 +31,8 @@ pub use cascade::CascadeDispatcher;
 pub use default::DefaultWorkerDispatcher;
 pub use intent::{BuiltinIntentDispatcher, IntentMatcher};
 pub use llm::{
-    LlmBackend, OpenAiCompatBackend, OzCliBackend, WorkerInfo, default_classifier_prompt,
-    parse_worker_id,
+    LlmBackend, LlmDispatcher, OpenAiCompatBackend, OzCliBackend, WorkerInfo, build_llm_stage,
+    default_classifier_prompt, parse_worker_id,
 };
 
 /// The dispatcher's decision for a single turn.

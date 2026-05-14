@@ -201,3 +201,42 @@ reset_phrases = [
     "nueva conversacion", "nueva conversación",
     "new conversation", "forget", "forget everything", "reset",
 ]
+
+# ----------------------------------------------------------------------------
+#  Dispatcher (cascade routing — spec 0013 / orchestrator B)
+# ----------------------------------------------------------------------------
+# Stage 1 of the cascade is the built-in intent matchers (time, calc, spec,
+# session-reset, task-list/show/cancel/clean — all deterministic). Stage 3 is
+# the configured `agent.name` worker (catch-all). Stage 2 sits between them
+# and uses an LLM to pick the right worker for everything stage 1 didn't
+# claim — useful when paraphrase variance defeats keyword matchers.
+#
+# Stage 2 is OFF by default. Configuring `[dispatcher.fallback]` opts in. A
+# malformed section logs a warning and is silently disabled — the daemon
+# never refuses to start because of stage 2.
+#
+# ---- OpenAI-compatible HTTP endpoint --------------------------------------
+# Speaks the OpenAI Chat Completions wire protocol. Works against OpenAI
+# itself, Anthropic's OpenAI-compat shim, Groq, Fireworks, Mistral, Ollama
+# (with `/v1/...`), vLLM, llama.cpp's server, and Nvidia Triton's OpenAI-
+# compat endpoint. Provide the FULL URL including `/chat/completions` —
+# every provider's path differs and we don't guess.
+#
+# [dispatcher.fallback]
+# backend      = "openai_compat"
+# endpoint     = "https://api.groq.com/openai/v1/chat/completions"
+# model        = "llama-3.1-8b-instant"
+# api_key      = "gsk_xxx"        # optional; sent as `Authorization: Bearer ...`
+# timeout_secs = 5                # optional; per-call deadline, default 5s
+# [dispatcher.fallback.headers]   # optional; extra HTTP headers
+# "X-VPN-Route" = "gb200-cluster"
+#
+# ---- Warp's `oz` CLI as subprocess ----------------------------------------
+# Spawns `oz agent run --model X --prompt ...`. Useful when oz is already
+# installed and authenticated (no API key plumbing here — oz handles that).
+#
+# [dispatcher.fallback]
+# backend      = "oz"
+# model        = "claude-3.7-sonnet"
+# binary       = "oz"             # optional; defaults to "oz" on PATH
+# timeout_secs = 5                # optional

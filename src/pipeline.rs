@@ -7,6 +7,7 @@
 
 use std::fs;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -16,7 +17,8 @@ use tracing::{info, warn};
 use crate::agents;
 use crate::config::{self as cfg_mod, JarvisConfig, RecordConfig};
 use crate::dispatcher::{
-    BuiltinIntentDispatcher, CascadeDispatcher, DefaultWorkerDispatcher, Dispatcher,
+    BuiltinIntentDispatcher, CascadeDispatcher, DefaultWorkerDispatcher, Dispatcher, LlmDispatcher,
+    build_llm_stage,
 };
 use crate::handlers;
 use crate::recorder;
@@ -166,18 +168,23 @@ pub fn run_turn(cfg: &JarvisConfig, opts: TurnOptions) -> Result<Option<String>>
         // Spec 0010 (orchestrator A): build the dispatcher cascade
         // and let it pick the worker for this turn. Stage 1 is the
         // built-in handlers (time, calc, spec, session-reset, etc.)
-        // matching deterministic phrases. Stage 2 (LLM dispatcher,
-        // hija B) is empty for now. Stage 3 is the configured
-        // default worker — almost always `cfg.agent.name`.
+        // matching deterministic phrases. Stage 2 is the optional
+        // LLM dispatcher (spec 0013 / hija B) — installed only when
+        // `[dispatcher.fallback]` is configured; absent that, the
+        // cascade keeps the v1 two-stage shape. Stage 3 is the
+        // configured default worker — almost always `cfg.agent.name`.
         let mut registry = WorkerRegistry::load_from_dir(
             &cfg_mod::workers_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         );
         let matchers = handlers::register_builtins(&mut registry, cfg);
-        let dispatcher = CascadeDispatcher::new()
-            .push(Box::new(BuiltinIntentDispatcher::from_matchers(matchers)))
-            .push(Box::new(DefaultWorkerDispatcher::new(
-                cfg.agent.name.clone(),
-            )));
+        let mut dispatcher = CascadeDispatcher::new()
+            .push(Box::new(BuiltinIntentDispatcher::from_matchers(matchers)));
+        if let Some(llm) = llm_stage(cfg) {
+            dispatcher = dispatcher.push(Box::new(LlmStageHandle(llm)));
+        }
+        let dispatcher = dispatcher.push(Box::new(DefaultWorkerDispatcher::new(
+            cfg.agent.name.clone(),
+        )));
 
         let decision = dispatcher
             .dispatch(&prompt, &sess, &registry)?
@@ -337,6 +344,70 @@ pub fn run_turn(cfg: &JarvisConfig, opts: TurnOptions) -> Result<Option<String>>
     // around if the user explicitly asks (future flag).
     let _ = fs::remove_file(&wav);
     result
+}
+
+/// Process-wide LLM dispatcher (spec 0013 / hija B). Constructed at
+/// most once per daemon process so the 60s classification cache
+/// (`LlmDispatcher`'s internal `Mutex<HashMap>`) survives across
+/// turns; rebuilding per-turn would drop the cache before it ever
+/// got a chance to hit. Initialized on the first `run_turn` that
+/// has `[dispatcher.fallback]` configured.
+///
+/// `None` means "no stage-2 dispatcher" — either because the config
+/// section is absent, or because it was malformed at startup and
+/// `build_llm_stage` returned `Err`. Both cases produce the same
+/// "v1 two-stage cascade" behaviour the spec mandates.
+static LLM_STAGE: OnceLock<Option<Arc<LlmDispatcher>>> = OnceLock::new();
+
+/// Resolve the stage-2 LLM dispatcher for this `cfg`. Initializes
+/// the [`LLM_STAGE`] OnceLock on first call; returns the same
+/// `Arc` thereafter so the cache persists.
+///
+/// A malformed `[dispatcher.fallback]` block is intentionally
+/// non-fatal: `build_llm_stage` returns `Err`, we log a warning,
+/// and the daemon proceeds with the v1 cascade shape. This is the
+/// spec's "soft-fail on bad config" requirement.
+fn llm_stage(cfg: &JarvisConfig) -> Option<Arc<LlmDispatcher>> {
+    LLM_STAGE
+        .get_or_init(|| {
+            let raw = cfg.dispatcher.fallback.as_ref()?;
+            match build_llm_stage(raw) {
+                Ok(d) => {
+                    info!(
+                        backend = d.backend_name(),
+                        "dispatcher stage 2 (LLM) initialised"
+                    );
+                    Some(Arc::new(d))
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "[dispatcher.fallback] malformed; cascade reverts to v1 two-stage shape"
+                    );
+                    None
+                }
+            }
+        })
+        .clone()
+}
+
+/// Adapter that lets `Arc<LlmDispatcher>` be pushed onto the
+/// `CascadeDispatcher`'s `Vec<Box<dyn Dispatcher>>`. We can't push
+/// `Box::new(arc)` directly because `Arc<T>` doesn't auto-deref to
+/// `&dyn Dispatcher` in trait-object position; the newtype is the
+/// canonical workaround. Cheap — just a `Deref` indirection per
+/// dispatch call.
+struct LlmStageHandle(Arc<LlmDispatcher>);
+
+impl Dispatcher for LlmStageHandle {
+    fn dispatch(
+        &self,
+        prompt: &str,
+        session: &crate::session::Session,
+        registry: &WorkerRegistry,
+    ) -> Result<Option<crate::dispatcher::DispatchDecision>> {
+        self.0.dispatch(prompt, session, registry)
+    }
 }
 
 /// Best-effort audible "I'm listening" cue. Tries espeak-ng (universally

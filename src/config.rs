@@ -373,6 +373,22 @@ impl Default for SessionConfig {
     }
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct DispatcherConfig {
+    /// Optional stage-2 LLM classifier wired between the built-in
+    /// intent matchers (stage 1) and the default worker (stage 3).
+    ///
+    /// Stored as a raw `toml::Value` so a malformed inner shape
+    /// degrades to "no stage 2" instead of "daemon refuses to
+    /// start" — see spec 0013 / B-4. The pipeline calls
+    /// `dispatcher::llm::build_llm_stage` to attempt typed
+    /// conversion at startup; if that fails the dispatcher
+    /// cascade silently reverts to the v1 two-stage shape and the
+    /// error surfaces only as a tracing warning.
+    pub fallback: Option<toml::Value>,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default, deny_unknown_fields)]
 pub struct TasksConfig {
@@ -408,6 +424,7 @@ pub struct JarvisConfig {
     pub agent: AgentConfig,
     pub session: SessionConfig,
     pub tasks: TasksConfig,
+    pub dispatcher: DispatcherConfig,
 }
 
 impl Default for JarvisConfig {
@@ -423,6 +440,7 @@ impl Default for JarvisConfig {
             agent: AgentConfig::default(),
             session: SessionConfig::default(),
             tasks: TasksConfig::default(),
+            dispatcher: DispatcherConfig::default(),
         }
     }
 }

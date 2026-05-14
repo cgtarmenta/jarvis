@@ -31,9 +31,11 @@ use anyhow::Result;
 
 use crate::workers::{WorkerHandle, WorkerRegistry};
 
+pub mod cascade;
 pub mod openai_compat;
 pub mod oz_cli;
 
+pub use cascade::{LlmDispatcher, build_llm_stage};
 pub use openai_compat::OpenAiCompatBackend;
 pub use oz_cli::OzCliBackend;
 
