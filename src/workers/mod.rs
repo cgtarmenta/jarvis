@@ -7,5 +7,7 @@
 //! CLI surface land in subsequent commits as we work through the C slices.
 
 pub mod manifest;
+pub mod registry;
 
 pub use manifest::{KNOWN_PLACEHOLDERS, SessionIdCapture, SessionIdSource, WorkerManifest};
+pub use registry::{DisabledWorker, WorkerRegistry, load_default};
