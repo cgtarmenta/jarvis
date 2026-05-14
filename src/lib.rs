@@ -17,5 +17,6 @@ pub mod specs;
 pub mod stt;
 pub mod tts;
 pub mod wake;
+pub mod workers;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

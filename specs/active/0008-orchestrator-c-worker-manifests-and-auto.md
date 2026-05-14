@@ -1,13 +1,14 @@
 ---
-id:
+id: 0008
 title: Orchestrator C — Worker manifests and autodiscovery
-status: inbox
+status: active
 owner: unassigned
 created: 2026-05-14
 shipped:
 verifying:
 related:
-  - inbox/2026-05-13-generalist-orchestrator-that-spawns-spec.md
+id: 
+shipped: 
 ---
 
 # Orchestrator C — Worker manifests and autodiscovery
@@ -119,6 +120,8 @@ Out of scope:
 - Manifest signing / verification.
 
 ## Journal
+
+- 2026-05-14: promoted to active.
 
 - 2026-05-14: opened. First child of the orchestrator umbrella;
   blocks everything else because the manifest schema is what
