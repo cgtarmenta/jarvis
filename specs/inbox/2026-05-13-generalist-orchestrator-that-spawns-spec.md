@@ -129,6 +129,61 @@ Sketch only — design decisions deferred to active-spec phase:
   and tractable, but they solve problems we don't have yet.
   Re-evaluate after the basic listener + spawn flow lands.
 
+## Open questions (to resolve before promotion)
+
+Four design decisions block the rest. They block each other in roughly
+this order, so we attack them in this order.
+
+1. **What *is* the listener?** This determines the latency floor, what
+   "cheap to keep warm" actually costs in RAM and dollars, and what
+   kinds of decisions the listener can make. Sub-options:
+   - **(1a)** Hand-coded rule engine (regex / keyword intent table,
+     similar to the existing `src/specs/intent.rs`). Latency under
+     a millisecond, no API cost, no RAM tail. Each new pattern is
+     code, not config.
+   - **(1b)** Small persistent local LLM (Qwen2.5-0.5B, Llama-3.2-1B,
+     Phi-3.5-mini, etc. via `llama.cpp`/`mistral.rs`). Latency
+     ~200–500 ms on CPU. No API cost. ~200 MB–1 GB resident RAM.
+     Quality at this size is hit-or-miss for Spanish intent
+     classification — needs testing.
+   - **(1c)** Lightweight remote LLM (Claude Haiku 4.5, Gemini
+     Flash, GPT-4o-mini). Latency ~200–400 ms. High quality.
+     Per-turn API cost (small but non-zero). Data leaves the
+     machine. Auth handling we'd inherit from whichever CLI agent
+     binary the user already has installed.
+
+2. **Where does conversational memory live?** Today there's one
+   global `session.json`. With multiple workers it has to split:
+   - **(2a)** Listener owns the memory; workers are stateless per
+     turn, prompted with whatever the listener decides to include.
+   - **(2b)** Each worker owns its own session (claude has one,
+     gemini has one, etc.); the listener only routes.
+   - **(2c)** Hybrid: listener carries short-term context for
+     dispatch, each worker maintains its own long-term session
+     that the listener resumes on subsequent calls to that worker.
+
+3. **Are async tasks queryable after dispatch?** "Spawn and forget"
+   can mean two very different things:
+   - **(3a)** Fire-and-forget only: dispatch, capture stdout, notify
+     when done. No way to ask about an in-flight task — if you forget
+     what you spawned, it's gone until it completes.
+   - **(3b)** Tracked: an in-memory (or on-disk) task registry. The
+     listener can answer "¿qué tareas tengo corriendo?", "cancela
+     la última", "muéstrame el resultado del análisis del log".
+     Significantly more code, but it's where the orchestrator stops
+     feeling like a glorified shell-out and starts feeling like
+     actual delegation.
+
+4. **How is a worker declared?** The spec promises "config change,
+   not Rust diff" — but the shape isn't settled:
+   - **(4a)** A `[[workers]]` array of stanzas inside the existing
+     `~/.config/jarvis/config.toml`.
+   - **(4b)** Separate manifests in `~/.config/jarvis/workers/*.toml`,
+     one per worker, autodiscovered on startup.
+   - **(4c)** Plugin-style: each worker is an executable on PATH
+     that implements a small handshake protocol (manifest on
+     `--describe`, request/response on stdin/stdout).
+
 ## Journal
 
 - 2026-05-13: opened as a vision note at the end of a
