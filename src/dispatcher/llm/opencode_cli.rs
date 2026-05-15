@@ -43,13 +43,13 @@ use anyhow::{Context, Result, anyhow};
 
 use super::{LlmBackend, WorkerInfo, default_classifier_prompt, parse_worker_id};
 
-/// Default per-call timeout. Measured P50 ≈ 3s, P95 < 5s across
-/// opencode's free-tier models (qwen3.6-plus-free,
-/// deepseek-v4-flash-free, big-pickle) on 2026-05-15. 15s gives
-/// 3x P95 headroom — generous without locking the cascade out
-/// for unbounded time. Override via `timeout_secs` in
-/// `[dispatcher.fallback]`.
-const DEFAULT_TIMEOUT_SECS: u64 = 15;
+/// Default per-call timeout. Initial bench (short prompt) showed
+/// P50 ≈ 3s, but the re-bench on 2026-05-15 with the *production*
+/// classifier prompt (full worker list + real transcript) found
+/// P95 ≈ 12-15s on the slower free models (nemotron-3, qwen3.6).
+/// 20s covers the slowest realistic case with margin; tighter
+/// users override via `timeout_secs` in `[dispatcher.fallback]`.
+const DEFAULT_TIMEOUT_SECS: u64 = 20;
 
 /// `opencode` subprocess classifier.
 ///

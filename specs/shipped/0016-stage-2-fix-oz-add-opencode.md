@@ -1,10 +1,10 @@
 ---
 id: 0016
 title: Stage-2 backend — fix oz parsing/timeout + add opencode
-status: active
+status: shipped
 owner: tadeo
 created: 2026-05-15
-shipped:
+shipped: 2026-05-15
 verifying:
   - src/dispatcher/llm/oz_cli.rs tests
   - src/dispatcher/llm/opencode_cli.rs tests
@@ -230,6 +230,48 @@ someone wants to re-measure before promotion.
   contract a lot. Not now.
 
 ## Journal
+
+- 2026-05-15: shipped. End-to-end verified on user's machine
+  against opencode/big-pickle with the new 20s default timeout:
+  - Conversational turn ("Vamos, estamos corriendo otra
+    prueba...") → stage 2 classified in ~11.3s (within budget),
+    routed to `claude`. No timeout, no fall-through.
+  - Time-query turn ("qué hora es") → stage 1 deterministic
+    intent matcher caught it sub-second, never invoked stage 2.
+  - Worker-list query ("¿qué otros workers hay?") → stage 2
+    classified in ~4.3s, routed to `claude`. Clean.
+  Zero `WARN llm classifier failed` lines across the session,
+  zero `falling through to stage 3` lines. The whole point of
+  the spec — restore oz to working order, add opencode as a
+  voice-cascade-fast option — is met. Acceptance criteria all
+  checked, tests 280 unit + 12 integration green.
+
+- 2026-05-15: post-implementation re-bench. User exercised the
+  wizard + daemon end-to-end against opencode. Three findings
+  drove a small tuning commit:
+  - **Config had `timeout_secs = 5`.** User typed it manually,
+    extrapolating from the morning bench (which reported P50
+    ~3s for opencode-free models and made 5s look like a safe
+    margin). The wizard's actual default was 15; the user
+    overrode it based on the (misleading) latency numbers I'd
+    shared. Root cause is mine — see next bullet.
+  - **Initial bench was misleading.** The 2026-05-15 morning
+    bench used a short prompt ("qué hora es en Tokio"); the
+    production classifier prompt (full worker list +
+    transcribed transcript) re-bench showed ~2x latency:
+    nemotron-3 12.89s/7.55s, qwen3.6 7.59s/6.55s,
+    deepseek-v4-flash 4.78s/3.40s, big-pickle 3.96s/3.77s.
+  - **Model quality varied widely with the real prompt.**
+    nemotron-3 returned `task-list` for a conversational
+    prompt (wrong); qwen returned `claude` (wrong but
+    survivable); deepseek + big-pickle declined cleanly with
+    `none` (correct routing). big-pickle was both fastest
+    and best-routing.
+
+  Tuning fix applied: `DEFAULT_TIMEOUT_OPENCODE` 15→20 (covers
+  P95 with margin); `OPENCODE_DEFAULT_MODEL` switched from
+  `qwen3.6-plus-free` to `big-pickle`. Backend `DEFAULT_TIMEOUT_SECS`
+  bumped to match. Example TOML updated. Tests still green.
 
 - 2026-05-15: implementation landed across four slices.
   - **A. OzCliBackend fix** — added `--output-format json` to argv;

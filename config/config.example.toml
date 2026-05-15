@@ -260,6 +260,6 @@ reset_phrases = [
 #
 # [dispatcher.fallback]
 # backend      = "opencode"
-# model        = "opencode/qwen3.6-plus-free"
+# model        = "opencode/big-pickle"
 # binary       = "opencode"       # optional; defaults to "opencode" on PATH
-# timeout_secs = 15               # optional; per-call deadline, default 15s
+# timeout_secs = 20               # optional; per-call deadline, default 20s

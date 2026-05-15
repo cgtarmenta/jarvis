@@ -25,11 +25,14 @@ use crate::dispatcher::llm::{
 /// for one. Values match each backend's measured-realistic floor
 /// (spec 0016 bench, 2026-05-15): openai_compat is a sub-second
 /// HTTP call so 5s is generous; oz's classifier runs 8-15s and
-/// wants 30s headroom; opencode-free models land 3s with 15s
-/// headroom.
+/// wants 30s headroom; opencode wants 20s — the original 15s came
+/// from a short-prompt bench, but the *production* classifier
+/// prompt (full worker list + transcript) re-bench on 2026-05-15
+/// showed P95 ≈12-15s on slower models, so 15s was borderline.
+/// 20s leaves comfortable margin without hurting cascade UX.
 const DEFAULT_TIMEOUT_OPENAI_COMPAT: u64 = 5;
 const DEFAULT_TIMEOUT_OZ: u64 = 30;
-const DEFAULT_TIMEOUT_OPENCODE: u64 = 15;
+const DEFAULT_TIMEOUT_OPENCODE: u64 = 20;
 
 pub fn configure_dispatcher_fallback(theme: &ColorfulTheme, cfg: &mut JarvisConfig) -> Result<()> {
     let has_existing = cfg.dispatcher.fallback.is_some();
@@ -206,9 +209,13 @@ fn collect_opencode(theme: &ColorfulTheme) -> Result<(toml::Table, Box<dyn LlmBa
 }
 
 /// Default model id when the wizard can't compute a smarter pick.
-/// Measured 3.06s P50 on 2026-05-15 with correct routing replies.
-/// Free-tier so no plan surprises.
-const OPENCODE_DEFAULT_MODEL: &str = "opencode/qwen3.6-plus-free";
+/// `big-pickle` won the production-prompt re-bench on 2026-05-15:
+/// fastest measured (~3.8s) AND best routing quality (declined
+/// cleanly with `none` on conversational prompts that don't
+/// match a worker, where qwen / nemotron hallucinated wrong
+/// workers like `claude` / `task-list`). Free-tier so no plan
+/// surprises.
+const OPENCODE_DEFAULT_MODEL: &str = "opencode/big-pickle";
 
 fn choose_opencode_model_from_list(theme: &ColorfulTheme, models: &[String]) -> Result<String> {
     print_models_table(models);
@@ -241,7 +248,7 @@ fn free_text_opencode_model(theme: &ColorfulTheme) -> Result<String> {
     println!("  ℹ Pick a model id that `opencode` accepts.");
     println!("    Run `opencode models` to see the current set.");
     let raw: String = Input::with_theme(theme)
-        .with_prompt("opencode model id (e.g. opencode/qwen3.6-plus-free)")
+        .with_prompt(format!("opencode model id (e.g. {OPENCODE_DEFAULT_MODEL})"))
         .default(OPENCODE_DEFAULT_MODEL.to_string())
         .interact_text()?;
     Ok(normalize_user_input(&raw))
@@ -304,12 +311,10 @@ fn prompt_timeout(theme: &ColorfulTheme, default_secs: u64) -> Result<u64> {
 }
 
 /// Render the catalog as a multi-column table (so it doesn't show
-/// up as a 50-line "chorizo") and prompt with tab-completion. The
-/// `Input` flow accepts any value the user types, so power users
-/// can pick a private/pre-release id that isn't in the live list —
-/// no separate "Other (custom)" sentinel needed. Default is `auto`,
-/// which is always present in oz's catalog and matches oz's own
-/// behaviour for unscoped calls.
+/// up as a chorizo) and prompt with tab-completion. The `Input`
+/// flow accepts any value the user types, so power users can pick
+/// a private/pre-release id that isn't in the live list — no
+/// separate "Other (custom)" sentinel needed.
 fn choose_oz_model_from_list(theme: &ColorfulTheme, models: &[String]) -> Result<String> {
     print_models_table(models);
 
