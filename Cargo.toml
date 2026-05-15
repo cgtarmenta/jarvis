@@ -58,6 +58,10 @@ serde_json = "1.0"
 # Interactive setup wizard. `dialoguer` is the mature pick — Select / Input /
 # Confirm / Password prompts that respect TERM and degrade in plain pipes.
 dialoguer = { version = "0.11", default-features = false, features = ["completion", "password"] }
+# `console` is a transitive dep of dialoguer; promoting it to direct lets
+# the setup wizard read the terminal width for the multi-column oz-model
+# table (spec 0014).
+console = "0.15"
 # Progress bars for model / voice downloads.
 indicatif = "0.17"
 regex = "1.12.3"

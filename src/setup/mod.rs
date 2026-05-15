@@ -11,9 +11,12 @@
 //! for reference; the user's file is the working copy).
 
 mod deps;
+mod dispatcher;
 mod locale;
 mod voices;
 mod whisper;
+
+pub use self::dispatcher::{looks_like_http_url, normalize_user_input};
 
 use std::fs;
 use std::path::Path;
@@ -46,6 +49,11 @@ pub fn run() -> Result<()> {
             println!("⚠ Existing config could not be loaded:");
             println!("  {err:#}");
             println!();
+            // Heads-up about `[dispatcher.fallback]` before the .bak rotation
+            // — saves the user having to dig through `.toml.bak` to recover
+            // their stage-2 config when the failure is unrelated to it (e.g.
+            // a schema-version bump invalidates the whole file).
+            warn_if_had_dispatcher_fallback(&cfg_path);
             backup_existing(&cfg_path)?;
             config::JarvisConfig::default()
         }
@@ -202,7 +210,12 @@ pub fn run() -> Result<()> {
         );
     }
 
-    // 5. Save --------------------------------------------------------------
+    // 6. Dispatcher fallback (optional stage 2) ----------------------------
+    println!();
+    println!("== Dispatcher fallback (stage 2 LLM classifier) ==");
+    dispatcher::configure_dispatcher_fallback(&theme, &mut cfg)?;
+
+    // 7. Save --------------------------------------------------------------
     println!();
     save_config(&cfg, &cfg_path)?;
     println!("Saved config to {}", cfg_path.display());
@@ -462,11 +475,45 @@ fn configure_agent(theme: &ColorfulTheme, cfg: &mut JarvisConfig) -> Result<()> 
     match name {
         "openai" => prompt_api_key(theme, cfg, "OPENAI_API_KEY")?,
         "gemini" => prompt_api_key(theme, cfg, "GEMINI_API_KEY")?,
-        "warp" => prompt_api_key(theme, cfg, "WARP_API_KEY")?,
+        "warp" => configure_warp_auth(theme, cfg)?,
         "shell" => prompt_shell_command(theme, cfg)?,
         _ => {}
     }
     Ok(())
+}
+
+/// Pick the right auth path for the warp/oz agent. `oz` authenticates
+/// via `oz login` (token cached in its state dir) for nearly every
+/// user; the `WARP_API_KEY` env var is the alternative for headless
+/// / CI flows. The old prompt assumed key-based auth unconditionally,
+/// which made the wizard ask for a key even when oz was already
+/// logged in. Now we probe `oz whoami` first and skip the prompt
+/// entirely when authenticated.
+fn configure_warp_auth(theme: &ColorfulTheme, cfg: &mut JarvisConfig) -> Result<()> {
+    if oz_is_authenticated() {
+        println!("  ✓ `oz` is already logged in — no API key needed.");
+        cfg.agent.options.remove("api_key");
+        return Ok(());
+    }
+    println!("  ℹ Recommended: run `oz login` (no key plumbing needed).");
+    println!("    Or store WARP_API_KEY below if you prefer key-based auth.");
+    prompt_api_key(theme, cfg, "WARP_API_KEY")
+}
+
+/// `oz whoami` exits 0 only when the local oz install holds a valid
+/// session. Cheap enough to call from the wizard (~couple of seconds
+/// the one time it touches Warp's API), and unambiguous — no parsing
+/// required, just the exit code.
+fn oz_is_authenticated() -> bool {
+    use std::process::Stdio;
+    std::process::Command::new("oz")
+        .arg("whoami")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn prompt_api_key(theme: &ColorfulTheme, cfg: &mut JarvisConfig, env_var: &str) -> Result<()> {
@@ -521,6 +568,31 @@ fn prompt_shell_command(theme: &ColorfulTheme, cfg: &mut JarvisConfig) -> Result
 // Save
 // ---------------------------------------------------------------------------
 
+/// If the broken-to-load config file mentions `[dispatcher.fallback]`,
+/// print a tip so the user knows to copy that block back from the
+/// resulting `.bak` once the wizard finishes regenerating the file.
+///
+/// Exposed as a free function (and the substring helper below as
+/// `pub(crate)`) so the integration tests can lock the trigger logic
+/// without depending on dialoguer / a real config-load failure.
+pub fn config_text_mentions_dispatcher_fallback(text: &str) -> bool {
+    text.contains("[dispatcher.fallback")
+}
+
+fn warn_if_had_dispatcher_fallback(path: &Path) {
+    let Ok(raw) = fs::read_to_string(path) else {
+        return;
+    };
+    if config_text_mentions_dispatcher_fallback(&raw) {
+        println!(
+            "  ℹ Your broken config had a [dispatcher.fallback] section. \
+             After the wizard regenerates the file you can paste that \
+             block back from the .bak."
+        );
+        println!();
+    }
+}
+
 /// Back up `path` to `path.bak` (rotating any existing .bak out of the way).
 fn backup_existing(path: &Path) -> Result<()> {
     if !path.exists() {
@@ -550,13 +622,15 @@ fn backup_existing(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Render the config struct back to TOML and write it out.
+/// Render the config struct back to a TOML string.
 ///
-/// We re-render rather than patch the existing file because the example
-/// ships with extensive comments and round-tripping comments through serde
-/// would be unreliable. The bundled example remains the canonical
-/// documentation; the user's edited file is the working copy.
-fn save_config(cfg: &JarvisConfig, path: &Path) -> Result<()> {
+/// Exposed (alongside `save_config`) so integration tests can assert the
+/// round-trip without going through the filesystem. We re-render rather
+/// than patch the existing file because the example ships with extensive
+/// comments and round-tripping comments through serde would be
+/// unreliable. The bundled example remains the canonical documentation;
+/// the user's edited file is the working copy.
+pub fn render_config(cfg: &JarvisConfig) -> Result<String> {
     let mut buf = String::new();
     buf.push_str("# Generated by `jarvis setup`. Edit freely.\n");
     buf.push_str(&format!("config_version = {}\n", cfg.config_version));
@@ -568,8 +642,36 @@ fn save_config(cfg: &JarvisConfig, path: &Path) -> Result<()> {
     serialize_section(&mut buf, "stt", &cfg.stt)?;
     serialize_section(&mut buf, "tts", &cfg.tts)?;
     serialize_agent(&mut buf, cfg)?;
+    serialize_section(&mut buf, "session", &cfg.session)?;
+    serialize_section(&mut buf, "tasks", &cfg.tasks)?;
+    serialize_dispatcher_fallback(&mut buf, cfg)?;
+    Ok(buf)
+}
 
+fn save_config(cfg: &JarvisConfig, path: &Path) -> Result<()> {
+    let buf = render_config(cfg)?;
     fs::write(path, buf).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
+/// Render `[dispatcher.fallback]` if configured. We wrap the inner
+/// value in `{ dispatcher: { fallback: ... } }` so the toml crate
+/// emits the dotted parent header `[dispatcher.fallback]` and renders
+/// any sub-tables (like `headers`) with the full prefix. A bare
+/// `serialize_section("dispatcher", ...)` would emit `[fallback]`
+/// inside `[dispatcher]`, which round-trips wrong because the
+/// `JarvisConfig` struct expects `dispatcher` to *be* the parent.
+fn serialize_dispatcher_fallback(buf: &mut String, cfg: &JarvisConfig) -> Result<()> {
+    let Some(fallback) = &cfg.dispatcher.fallback else {
+        return Ok(());
+    };
+    let mut root = toml::Table::new();
+    let mut dispatcher = toml::Table::new();
+    dispatcher.insert("fallback".into(), fallback.clone());
+    root.insert("dispatcher".into(), toml::Value::Table(dispatcher));
+    let rendered = toml::to_string(&root)?;
+    buf.push_str(&rendered);
+    buf.push('\n');
     Ok(())
 }
 

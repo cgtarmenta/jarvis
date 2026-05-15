@@ -941,6 +941,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "clap",
+ "console",
  "dialoguer",
  "directories",
  "evalexpr",
