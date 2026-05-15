@@ -263,3 +263,29 @@ reset_phrases = [
 # model        = "opencode/big-pickle"
 # binary       = "opencode"       # optional; defaults to "opencode" on PATH
 # timeout_secs = 20               # optional; per-call deadline, default 20s
+
+# ----------------------------------------------------------------------------
+#  Apps — voice-driven app launcher (spec 0015)
+# ----------------------------------------------------------------------------
+# The `app-launcher` built-in handler turns "abre Firefox" / "launch Spotify"
+# into a direct OS-level spawn. Triggers: abre / abrir / lanza / lanzar /
+# inicia / iniciar / open / launch / start, followed by the app name.
+#
+# Ships with a built-in alias table for ~25 common desktop apps (firefox,
+# chrome, vscode, spotify, slack, signal, obsidian, …). Add your own here
+# for niche / custom binaries; user aliases override built-ins.
+#
+# Keys are case-insensitive and accent-folded at load. Values are the
+# binary or `.desktop`-registered name passed to `xdg-open` (Linux) /
+# `open -a` (macOS).
+#
+# Blocked names (rm, sudo, shutdown, reboot, kill, systemctl, etc.) are
+# refused even when present in this map — see spec 0015's "Refusal list"
+# for the full policy.
+#
+# [apps.aliases]
+# "ide"              = "code-insiders"
+# "signal"           = "signal-desktop"
+# "obsidian"         = "obsidian-flatpak"
+# "music"            = "spotify"
+# "navegador"        = "firefox"

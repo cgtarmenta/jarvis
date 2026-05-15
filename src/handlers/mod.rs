@@ -9,6 +9,7 @@
 //! piece. Handlers stay tiny (~50-100 LoC) so adding a new one is
 //! a copy-paste pattern rather than a framework adventure.
 
+pub mod app_launcher;
 pub mod calc;
 pub mod date_today;
 pub mod session_reset;
@@ -19,6 +20,7 @@ pub mod task_list;
 pub mod task_show;
 pub mod time_of_day;
 
+pub use app_launcher::AppLauncherHandler;
 pub use calc::CalcHandler;
 pub use date_today::DateTodayHandler;
 pub use session_reset::SessionResetHandler;
@@ -82,7 +84,23 @@ pub fn register_builtins(
     registry.register_builtin(calc_worker);
     matchers.push(Arc::new(CalcHandler));
 
-    // 5. Task list (spec 0012 / E2) — "qué tareas tengo", etc.
+    // 5. App launcher (spec 0015) — "abre Firefox", "launch Spotify".
+    //    Position AFTER spec is load-bearing: spec's triggers
+    //    include `"abre un spec para "`, which shares the
+    //    `"abre "` prefix with the app launcher. Spec runs first
+    //    so spec-management phrases route correctly; only "abre
+    //    <app>" phrases that don't match spec land here.
+    //    User-defined aliases from `[apps.aliases]` override the
+    //    built-in alias table.
+    let app_launcher_worker: Arc<dyn WorkerHandle> = Arc::new(
+        AppLauncherHandler::with_user_aliases(cfg.apps.aliases.clone()),
+    );
+    registry.register_builtin(app_launcher_worker);
+    matchers.push(Arc::new(AppLauncherHandler::with_user_aliases(
+        cfg.apps.aliases.clone(),
+    )));
+
+    // 6. Task list (spec 0012 / E2) — "qué tareas tengo", etc.
     //    Position before session-reset because the reset phrase
     //    list is short and shouldn't trip on a substring of a
     //    task-list utterance.
@@ -90,22 +108,22 @@ pub fn register_builtins(
     registry.register_builtin(task_list_worker);
     matchers.push(Arc::new(TaskListHandler));
 
-    // 6. Task show (spec 0012 / E2) — "muéstrame el resultado de X".
+    // 7. Task show (spec 0012 / E2) — "muéstrame el resultado de X".
     let task_show_worker: Arc<dyn WorkerHandle> = Arc::new(TaskShowHandler);
     registry.register_builtin(task_show_worker);
     matchers.push(Arc::new(TaskShowHandler));
 
-    // 7. Task cancel (spec 0012 / E2) — "cancela esa tarea".
+    // 8. Task cancel (spec 0012 / E2) — "cancela esa tarea".
     let task_cancel_worker: Arc<dyn WorkerHandle> = Arc::new(TaskCancelHandler);
     registry.register_builtin(task_cancel_worker);
     matchers.push(Arc::new(TaskCancelHandler));
 
-    // 8. Task clean (spec 0012 / E2) — "limpia las viejas".
+    // 9. Task clean (spec 0012 / E2) — "limpia las viejas".
     let task_clean_worker: Arc<dyn WorkerHandle> = Arc::new(TaskCleanHandler);
     registry.register_builtin(task_clean_worker);
     matchers.push(Arc::new(TaskCleanHandler));
 
-    // 9. Session reset — short, terminal. Last because its phrase
+    // 10. Session reset — short, terminal. Last because its phrase
     //    list (`olvida`, `reset`) is so short it could match
     //    substrings of the others if we ever relax equality.
     let reset_worker: Arc<dyn WorkerHandle> =
@@ -242,12 +260,14 @@ mod tests {
         let mut registry = WorkerRegistry::default();
         let matchers = register_builtins(&mut registry, &cfg);
 
-        // Registry has all nine worker entries.
+        // Registry has all ten worker entries (spec 0015 added
+        // app-launcher between calc and task-list).
         for id in [
             "spec",
             "time",
             "date",
             "calc",
+            "app-launcher",
             "task-list",
             "task-show",
             "task-cancel",
@@ -261,7 +281,7 @@ mod tests {
         }
 
         // Matchers list mirrors registration order.
-        assert_eq!(matchers.len(), 9);
+        assert_eq!(matchers.len(), 10);
         let ids: Vec<&str> = matchers.iter().map(|m| m.worker_id()).collect();
         assert_eq!(
             ids,
@@ -270,6 +290,7 @@ mod tests {
                 "time",
                 "date",
                 "calc",
+                "app-launcher",
                 "task-list",
                 "task-show",
                 "task-cancel",
@@ -277,5 +298,54 @@ mod tests {
                 "session-reset",
             ]
         );
+    }
+
+    /// Spec 0015 — app-launcher routes "abre <app>" to its
+    /// handler, and the spec → app-launcher ordering means
+    /// "abre un spec para X" still routes to spec (not
+    /// app-launcher). Locking this so a future re-ordering of
+    /// register_builtins doesn't silently break either path.
+    #[test]
+    fn app_launcher_and_spec_share_abre_prefix_correctly() {
+        use crate::dispatcher::{
+            BuiltinIntentDispatcher, CascadeDispatcher, DefaultWorkerDispatcher, Dispatcher,
+        };
+        use crate::session::Session;
+
+        let cfg = JarvisConfig::default();
+        let mut registry = WorkerRegistry::default();
+        let matchers = register_builtins(&mut registry, &cfg);
+        let cascade = CascadeDispatcher::new()
+            .push(Box::new(BuiltinIntentDispatcher::from_matchers(matchers)))
+            .push(Box::new(DefaultWorkerDispatcher::new("claude")));
+        let session = Session::new();
+
+        // "abre Firefox" → app-launcher (no spec match).
+        let d = cascade
+            .dispatch("abre Firefox", &session, &registry)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            d.worker_id, "app-launcher",
+            "abre <app> should route to app-launcher"
+        );
+
+        // "abre un spec para streaming TTS" → spec (longer
+        // trigger wins because spec is registered first).
+        let d = cascade
+            .dispatch("abre un spec para streaming TTS", &session, &registry)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            d.worker_id, "spec",
+            "abre un spec para X must still route to spec"
+        );
+
+        // "launch Spotify" → app-launcher.
+        let d = cascade
+            .dispatch("launch Spotify", &session, &registry)
+            .unwrap()
+            .unwrap();
+        assert_eq!(d.worker_id, "app-launcher");
     }
 }

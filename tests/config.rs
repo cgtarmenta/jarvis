@@ -58,6 +58,48 @@ fn env_overrides_agent() {
     assert_eq!(cfg.agent.name, "openai");
 }
 
+/// Spec 0015 — `[apps.aliases]` round-trips through `config::load`.
+/// User entries are kept verbatim; the handler does case-folding /
+/// normalisation at construction, not at parse time, so the raw
+/// keys survive.
+#[test]
+#[serial]
+fn apps_aliases_round_trip() {
+    let tmp = TempDir::new().unwrap();
+    redirect_xdg(&tmp);
+    let path = config::ensure_config().unwrap();
+
+    // Append an [apps.aliases] block to the example so config::load
+    // sees it. We *append* rather than rewrite because the wizard's
+    // serializer (spec 0014 + 0015) is exercised in a separate
+    // integration suite; this test pins config::load's deserialisation.
+    let mut content = std::fs::read_to_string(&path).unwrap();
+    content.push_str("\n[apps.aliases]\n");
+    content.push_str("\"signal-desktop\" = \"signal\"\n");
+    content.push_str("\"navegador\" = \"firefox\"\n");
+    std::fs::write(&path, content).unwrap();
+
+    let cfg = config::load(&path).expect("parse with apps.aliases");
+    assert_eq!(cfg.apps.aliases.len(), 2);
+    assert_eq!(
+        cfg.apps.aliases.get("signal-desktop").map(|s| s.as_str()),
+        Some("signal")
+    );
+    assert_eq!(
+        cfg.apps.aliases.get("navegador").map(|s| s.as_str()),
+        Some("firefox")
+    );
+}
+
+/// Default `JarvisConfig` has an empty `apps.aliases` map — no
+/// surprises at first-run, and the handler degrades to its
+/// built-in alias table.
+#[test]
+fn apps_aliases_default_is_empty() {
+    let cfg = JarvisConfig::default();
+    assert!(cfg.apps.aliases.is_empty());
+}
+
 #[test]
 fn defaults_are_sensible() {
     let cfg = JarvisConfig::default();

@@ -410,6 +410,25 @@ impl Default for TasksConfig {
     }
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct AppsConfig {
+    /// User-defined aliases for the voice app-launcher (spec 0015).
+    /// Maps a friendly name (the part after "abre"/"launch"/etc.) to
+    /// the binary or `.desktop` entry to spawn. Keys are case-
+    /// insensitive and accent-folded at handler load. User aliases
+    /// override the built-in table baked into `AppLauncherHandler`.
+    ///
+    /// Example:
+    /// ```toml
+    /// [apps.aliases]
+    /// "signal-desktop" = "signal"
+    /// "obsidian-flatpak" = "obsidian"
+    /// "ide" = "code-insiders"
+    /// ```
+    pub aliases: std::collections::HashMap<String, String>,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default, deny_unknown_fields)]
 pub struct JarvisConfig {
@@ -425,6 +444,7 @@ pub struct JarvisConfig {
     pub session: SessionConfig,
     pub tasks: TasksConfig,
     pub dispatcher: DispatcherConfig,
+    pub apps: AppsConfig,
 }
 
 impl Default for JarvisConfig {
@@ -441,6 +461,7 @@ impl Default for JarvisConfig {
             session: SessionConfig::default(),
             tasks: TasksConfig::default(),
             dispatcher: DispatcherConfig::default(),
+            apps: AppsConfig::default(),
         }
     }
 }

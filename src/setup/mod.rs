@@ -645,6 +645,7 @@ pub fn render_config(cfg: &JarvisConfig) -> Result<String> {
     serialize_section(&mut buf, "session", &cfg.session)?;
     serialize_section(&mut buf, "tasks", &cfg.tasks)?;
     serialize_dispatcher_fallback(&mut buf, cfg)?;
+    serialize_apps(&mut buf, cfg)?;
     Ok(buf)
 }
 
@@ -669,6 +670,28 @@ fn serialize_dispatcher_fallback(buf: &mut String, cfg: &JarvisConfig) -> Result
     let mut dispatcher = toml::Table::new();
     dispatcher.insert("fallback".into(), fallback.clone());
     root.insert("dispatcher".into(), toml::Value::Table(dispatcher));
+    let rendered = toml::to_string(&root)?;
+    buf.push_str(&rendered);
+    buf.push('\n');
+    Ok(())
+}
+
+/// Render `[apps.aliases]` if the user has any entries. Empty
+/// aliases skip the section entirely to keep the generated file
+/// tidy — `AppsConfig::default()` round-trips through `config::load`
+/// without needing a literal `[apps]` block.
+fn serialize_apps(buf: &mut String, cfg: &JarvisConfig) -> Result<()> {
+    if cfg.apps.aliases.is_empty() {
+        return Ok(());
+    }
+    let mut root = toml::Table::new();
+    let mut apps = toml::Table::new();
+    let mut aliases = toml::Table::new();
+    for (k, v) in &cfg.apps.aliases {
+        aliases.insert(k.clone(), toml::Value::String(v.clone()));
+    }
+    apps.insert("aliases".into(), toml::Value::Table(aliases));
+    root.insert("apps".into(), toml::Value::Table(apps));
     let rendered = toml::to_string(&root)?;
     buf.push_str(&rendered);
     buf.push('\n');
