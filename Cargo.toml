@@ -63,7 +63,7 @@ dialoguer = { version = "0.11", default-features = false, features = ["completio
 # table (spec 0014).
 console = "0.15"
 # Progress bars for model / voice downloads.
-indicatif = "0.17"
+indicatif = "0.18"
 regex = "1.12.3"
 portable-pty = "0.9.0"
 chrono = { version = "0.4.44", default-features = false, features = ["clock", "std"] }
