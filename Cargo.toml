@@ -30,7 +30,7 @@ toml = "0.8"
 
 # Cross-platform XDG / Library paths. ``directories`` works on Linux, macOS,
 # and BSD; this is the multi-Unix lifeline.
-directories = "5.0"
+directories = "6.0"
 
 # Structured logging with env-var control. ``tracing-subscriber`` formats
 # nicely for journalctl and for terminals.
