@@ -1,8 +1,8 @@
 ---
-id:
+id: 0015
 title: App launcher — voice-driven application launching across OSes
-status: inbox
-owner: unassigned
+status: active
+owner: tadeo
 created: 2026-05-14
 shipped:
 verifying:
