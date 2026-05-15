@@ -232,11 +232,34 @@ reset_phrases = [
 # "X-VPN-Route" = "gb200-cluster"
 #
 # ---- Warp's `oz` CLI as subprocess ----------------------------------------
-# Spawns `oz agent run --model X --prompt ...`. Useful when oz is already
-# installed and authenticated (no API key plumbing here — oz handles that).
+# Spawns `oz agent run --output-format json --model X --prompt ...` and
+# parses the NDJSON event stream. Useful when oz is already installed and
+# authenticated (`oz login`) — no API key plumbing here, oz handles auth.
+#
+# Perf note: stage 2 with oz adds ~8-15s/turn (measured 2026-05-15 across
+# the catalog). For sub-second routing, use `openai_compat` against a
+# local endpoint (Triton/Ollama/vLLM) or `opencode` (below).
+#
+# Run `oz model list` to see available models — they rotate as Warp ships
+# new ones; older ids like `claude-3.7-sonnet` may be deprecated.
 #
 # [dispatcher.fallback]
 # backend      = "oz"
-# model        = "claude-3.7-sonnet"
+# model        = "auto-efficient"
 # binary       = "oz"             # optional; defaults to "oz" on PATH
-# timeout_secs = 5                # optional
+# timeout_secs = 30               # optional; per-call deadline, default 30s
+#
+# ---- opencode CLI as subprocess -------------------------------------------
+# Spawns `opencode run --format json -m <provider/model> <prompt>` and
+# parses the NDJSON event stream. Fastest CLI-agent classifier on the
+# bench (P50 ~3s with the free-tier opencode/*-free models). No API key
+# plumbing — opencode manages its own auth via `opencode auth login`.
+#
+# Run `opencode models` to see the catalog. The default below is one of
+# the free-tier models; replace with any `provider/model` opencode lists.
+#
+# [dispatcher.fallback]
+# backend      = "opencode"
+# model        = "opencode/qwen3.6-plus-free"
+# binary       = "opencode"       # optional; defaults to "opencode" on PATH
+# timeout_secs = 15               # optional; per-call deadline, default 15s

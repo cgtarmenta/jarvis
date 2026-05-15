@@ -61,26 +61,26 @@ gap between "stage 2 is wired in" and "stage 2 is actually useful".
 
 ### Fix OzCliBackend (touches shipped 0013/B-3)
 
-- [ ] Invoke `oz agent run` with `--output-format json` in
+- [x] Invoke `oz agent run` with `--output-format json` in
       `OzCliBackend::classify`. The flag was missing in B-3, which
       is why the wrapper saw the human-readable handle preamble
       instead of structured events.
-- [ ] Parse the resulting NDJSON stream. Filter events by
+- [x] Parse the resulting NDJSON stream. Filter events by
       `type == "agent"` (the model's user-facing reply, distinct
       from `agent_reasoning` chain-of-thought and `system`
       run/conversation handles). Concatenate the `text` fields in
       order, then hand the concatenation to the existing
       `parse_worker_id`.
-- [ ] If the stream contains zero `agent` events before subprocess
+- [x] If the stream contains zero `agent` events before subprocess
       exit (only `agent_reasoning` or `system`, e.g. a reasoning
       model that exhausted its budget thinking), return `Ok(None)`.
       The cascade falls through to stage 3 — same envelope as
       every other "decline" path. **Do not** error out.
-- [ ] Default timeout: `DEFAULT_TIMEOUT_SECS = 5` → `30`. P95
+- [x] Default timeout: `DEFAULT_TIMEOUT_SECS = 5` → `30`. P95
       across realistic models is ≈15s; 30s is 2x P95 headroom
       without locking the cascade out for unbounded time. Users
       who want tighter can override in TOML.
-- [ ] Tests (`src/dispatcher/llm/oz_cli.rs`):
+- [x] Tests (`src/dispatcher/llm/oz_cli.rs`):
   - Fixture stream with `run_started` + `conversation_started` +
     `agent_reasoning` + `agent` events → extracted text matches
     the `agent` event(s) only.
@@ -92,28 +92,28 @@ gap between "stage 2 is wired in" and "stage 2 is actually useful".
 
 ### Add OpencodeCliBackend (new file)
 
-- [ ] New module `src/dispatcher/llm/opencode_cli.rs` mirroring the
+- [x] New module `src/dispatcher/llm/opencode_cli.rs` mirroring the
       shape of `oz_cli.rs`. Public type `OpencodeCliBackend`
       implementing `LlmBackend`. Constructor takes a model id
       (`provider/model` shape per opencode's convention).
-- [ ] Argv: `opencode run --format json -m <provider/model> <prompt>`.
+- [x] Argv: `opencode run --format json -m <provider/model> <prompt>`.
       No api_key plumbing — `opencode` handles auth via its own
       login store, same convention as `oz`.
-- [ ] Parse NDJSON. Filter events by `type == "text"` and read
+- [x] Parse NDJSON. Filter events by `type == "text"` and read
       `part.text` (the actual model reply tokens). Concatenate;
       hand to `parse_worker_id`. Other event types
       (`step_start`, `step_finish`) are ignored.
-- [ ] If no `text` events surfaced before exit: `Ok(None)`.
-- [ ] Default timeout: 15s. Empirical P50≈3s, P95<5s across
+- [x] If no `text` events surfaced before exit: `Ok(None)`.
+- [x] Default timeout: 15s. Empirical P50≈3s, P95<5s across
       `*-free` models; 15s gives 3x P95 headroom.
-- [ ] Default model exposed to wizard-skip / config-default cases:
+- [x] Default model exposed to wizard-skip / config-default cases:
       `opencode/qwen3.6-plus-free` (measured median 3.06s with
       correct replies). Override via wizard or TOML.
-- [ ] Cascade integration (`src/dispatcher/llm/cascade.rs`):
+- [x] Cascade integration (`src/dispatcher/llm/cascade.rs`):
       `build_llm_stage` accepts `backend = "opencode"` and
       constructs an `OpencodeCliBackend`. Same shape as the
       existing oz / openai_compat branches.
-- [ ] Tests (`src/dispatcher/llm/opencode_cli.rs`):
+- [x] Tests (`src/dispatcher/llm/opencode_cli.rs`):
   - Real-captured fixture: `step_start` → `text` (with `part.text`
     = `time\n`) → `step_finish` → extracted text = `"time\n"`.
   - Fixture with multiple `text` events → concatenated.
@@ -125,11 +125,11 @@ gap between "stage 2 is wired in" and "stage 2 is actually useful".
 
 ### Wizard surface (touches shipped 0014)
 
-- [ ] In `src/setup/dispatcher.rs::configure_dispatcher_fallback`,
+- [x] In `src/setup/dispatcher.rs::configure_dispatcher_fallback`,
       add `opencode` as a third backend choice in the Select
       gated on `which::which("opencode").is_ok()`. Label suggestion:
       `opencode (free models, ~3s)`.
-- [ ] New `collect_opencode(theme)` mirroring `collect_oz`:
+- [x] New `collect_opencode(theme)` mirroring `collect_oz`:
       - Try to fetch the model list via `opencode models` (newline-
         delimited `provider/model`). On success, present a
         Select-with-completion using the same multi-column table
@@ -143,12 +143,12 @@ gap between "stage 2 is wired in" and "stage 2 is actually useful".
         `backend = "opencode"` + `model = <picked>`. Optionally
         prompt for `timeout_secs` (default 15) — parity with the
         oz branch (which this spec adds; see below).
-- [ ] Parity touch-up on `collect_oz`: expose `timeout_secs` as
+- [x] Parity touch-up on `collect_oz`: expose `timeout_secs` as
       an optional Input (default 30 after the bump) — the spec
       0014 originally skipped this because "defaults are right";
       empirical data on 2026-05-15 says they weren't, so the
       wizard now lets the user override.
-- [ ] Live probe envelope for the new backend matches oz /
+- [x] Live probe envelope for the new backend matches oz /
       openai_compat: one `classify` call against a one-worker
       fixture, surfaces `✓ classifier reachable` or
       `⚠ classifier didn't respond — saving config anyway`. Never
@@ -156,21 +156,21 @@ gap between "stage 2 is wired in" and "stage 2 is actually useful".
 
 ### Config docs
 
-- [ ] Add an `opencode` block to `config/config.example.toml`
+- [x] Add an `opencode` block to `config/config.example.toml`
       alongside the existing `oz` and `openai_compat` examples.
       Note the free-tier models with a one-line "stage 2 with
       opencode adds ~3s/turn" perf hint.
-- [ ] Update the existing `oz` example block to note the new
+- [x] Update the existing `oz` example block to note the new
       30s default timeout and a one-line "stage 2 with oz adds
       ~8-15s/turn" perf hint, so the user picks the right backend
       for their UX target.
 
 ### Integration tests
 
-- [ ] Round-trip a wizard-shaped `backend = "opencode"` table
+- [x] Round-trip a wizard-shaped `backend = "opencode"` table
       through `config::load` → assert equivalent, then through
       `dispatcher::llm::build_llm_stage` → assert it builds.
-- [ ] Round-trip the same with `backend = "oz"` after the
+- [x] Round-trip the same with `backend = "oz"` after the
       timeout bump — confirms re-shipping doesn't break the v1
       shape.
 
@@ -230,6 +230,48 @@ someone wants to re-measure before promotion.
   contract a lot. Not now.
 
 ## Journal
+
+- 2026-05-15: implementation landed across four slices.
+  - **A. OzCliBackend fix** — added `--output-format json` to argv;
+    new `extract_agent_text(stdout)` filters NDJSON for
+    `type=="agent"` events and concatenates `text` chunks; returns
+    `None` when only `agent_reasoning`/`system` surfaced so the
+    cascade declines cleanly. `DEFAULT_TIMEOUT_SECS` bumped 5 → 30.
+    Existing argv-pass-through test updated for the new argv shape
+    (prompt moved from `$6` to `$8` due to `--output-format json`
+    insert). Five new unit tests cover the parser (real shape,
+    multi-event concat, reasoning-only, empty, malformed lines).
+  - **B. OpencodeCliBackend** — new module mirroring oz_cli.rs.
+    Argv: `opencode run --format json -m <model> <prompt>`. Parser
+    filters `type=="text"` and reads nested `part.text` (with
+    defensive fallback to top-level `text` for future shape
+    changes). Default model `opencode/qwen3.6-plus-free`, default
+    timeout 15s. Wired into `cascade::build_llm_stage` matching
+    `backend = "opencode"`. Eleven new tests (5 integration, 6
+    pure parser).
+  - **C. Wizard** — third backend Select option for opencode
+    PATH-gated on `which::which("opencode")`. `collect_opencode`
+    reuses 0014's multi-column table + ModelCompletion. Parity
+    touch-up on `collect_oz` exposes `timeout_secs` (default 30).
+    Extracted `prompt_timeout(theme, default)` helper to keep the
+    three `collect_*` symmetric. Three new unit tests for
+    `parse_opencode_models`.
+  - **D. Config docs + integration tests** — example.toml gains a
+    full `[dispatcher.fallback].backend = "opencode"` block and
+    the `oz` block is updated with the new 30s default + a
+    "stage 2 with oz adds ~8-15s/turn" perf hint. Two new
+    integration tests (`tests/setup_dispatcher_fallback.rs`)
+    round-trip both new opencode-shaped TOML and the
+    timeout-extended oz-shaped TOML through render → write →
+    `config::load` → `build_llm_stage`.
+  - Suite total: 280 unit + 12 integration + others, all green.
+    cargo fmt clean.
+  - **Manual verification pending.** Same envelope as 0014:
+    user re-runs `jarvis setup` against the sandbox, confirms the
+    backend Select shows opencode, picks a free model, lets the
+    probe run, then exercises the daemon to confirm stage 2
+    actually routes correctly. Ship-move to `shipped/` happens
+    after that.
 
 - 2026-05-15: promoted to `active/` as **0016**. No design
   changes from the inbox draft — the bug analysis, benchmark

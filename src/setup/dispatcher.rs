@@ -17,9 +17,19 @@ use dialoguer::theme::ColorfulTheme;
 use dialoguer::{Completion, Confirm, Input, Password, Select};
 
 use crate::config::JarvisConfig;
-use crate::dispatcher::llm::{LlmBackend, OpenAiCompatBackend, OzCliBackend, WorkerInfo};
+use crate::dispatcher::llm::{
+    LlmBackend, OpenAiCompatBackend, OpencodeCliBackend, OzCliBackend, WorkerInfo,
+};
 
-const DEFAULT_TIMEOUT_SECS: u64 = 5;
+/// Per-backend default timeouts (seconds) when the wizard prompts
+/// for one. Values match each backend's measured-realistic floor
+/// (spec 0016 bench, 2026-05-15): openai_compat is a sub-second
+/// HTTP call so 5s is generous; oz's classifier runs 8-15s and
+/// wants 30s headroom; opencode-free models land 3s with 15s
+/// headroom.
+const DEFAULT_TIMEOUT_OPENAI_COMPAT: u64 = 5;
+const DEFAULT_TIMEOUT_OZ: u64 = 30;
+const DEFAULT_TIMEOUT_OPENCODE: u64 = 15;
 
 pub fn configure_dispatcher_fallback(theme: &ColorfulTheme, cfg: &mut JarvisConfig) -> Result<()> {
     let has_existing = cfg.dispatcher.fallback.is_some();
@@ -41,14 +51,23 @@ pub fn configure_dispatcher_fallback(theme: &ColorfulTheme, cfg: &mut JarvisConf
         return Ok(());
     }
 
-    // Hide `oz` unless the binary resolves on PATH. Offering a backend the
-    // user can't actually run would just produce a probe failure 30s later.
-    // `which::which` is the same lookup the oz backend uses at runtime.
+    // Hide CLI-agent backends unless their binary resolves on PATH.
+    // Offering a backend the user can't run would just surface a
+    // probe failure later. `which::which` matches the lookup the
+    // backend itself does at runtime.
     let oz_available = which::which("oz").is_ok();
+    let opencode_available = which::which("opencode").is_ok();
+    // openai_compat always shown first (the canonical fast path).
+    // opencode listed second when available — measured P50 ~3s on
+    // free models, fastest CLI-agent option. oz last — slower
+    // (P50 ~8s) and worth the warning surface.
     let mut choices: Vec<(&'static str, &'static str)> =
         vec![("openai_compat", "OpenAI-compatible HTTP endpoint")];
+    if opencode_available {
+        choices.push(("opencode", "opencode (free models, ~3s — recommended CLI)"));
+    }
     if oz_available {
-        choices.push(("oz", "oz (Warp's CLI)"));
+        choices.push(("oz", "oz (Warp's CLI, ~8-15s/turn)"));
     }
     let labels: Vec<&str> = choices.iter().map(|(_, l)| *l).collect();
     let idx = Select::with_theme(theme)
@@ -60,6 +79,7 @@ pub fn configure_dispatcher_fallback(theme: &ColorfulTheme, cfg: &mut JarvisConf
     let (table, backend) = match choices[idx].0 {
         "openai_compat" => collect_openai_compat(theme)?,
         "oz" => collect_oz(theme)?,
+        "opencode" => collect_opencode(theme)?,
         _ => unreachable!("Select index pinned to the choices list"),
     };
 
@@ -93,20 +113,7 @@ fn collect_openai_compat(theme: &ColorfulTheme) -> Result<(toml::Table, Box<dyn 
         .allow_empty_password(true)
         .interact()?;
     let api_key = normalize_user_input(&api_key_raw);
-    let timeout_raw: String = Input::with_theme(theme)
-        .with_prompt("Timeout (seconds)")
-        .default(DEFAULT_TIMEOUT_SECS.to_string())
-        .validate_with(|s: &String| -> Result<(), &'static str> {
-            s.trim()
-                .parse::<u64>()
-                .map(|_| ())
-                .map_err(|_| "must be a non-negative integer")
-        })
-        .interact_text()?;
-    let timeout_secs = timeout_raw
-        .trim()
-        .parse::<u64>()
-        .unwrap_or(DEFAULT_TIMEOUT_SECS);
+    let timeout_secs = prompt_timeout(theme, DEFAULT_TIMEOUT_OPENAI_COMPAT)?;
 
     let mut backend = OpenAiCompatBackend::new(endpoint.clone(), model.clone())
         .with_timeout(Duration::from_secs(timeout_secs));
@@ -148,12 +155,152 @@ fn collect_oz(theme: &ColorfulTheme) -> Result<(toml::Table, Box<dyn LlmBackend>
         }
     };
 
-    let backend = OzCliBackend::new(model.clone());
+    // Parity with openai_compat: prompt for timeout. Default 30s
+    // tracks the backend's new measured-realistic ceiling (spec
+    // 0016 bench — P95 ~15s, 30s gives 2x headroom).
+    let timeout_secs = prompt_timeout(theme, DEFAULT_TIMEOUT_OZ)?;
+
+    let backend = OzCliBackend::new(model.clone()).with_timeout(Duration::from_secs(timeout_secs));
 
     let mut t = toml::Table::new();
     t.insert("backend".into(), toml::Value::String("oz".into()));
     t.insert("model".into(), toml::Value::String(model));
+    t.insert(
+        "timeout_secs".into(),
+        toml::Value::Integer(timeout_secs as i64),
+    );
     Ok((t, Box::new(backend)))
+}
+
+/// Wizard branch for `backend = "opencode"` (spec 0016). Same
+/// shape as `collect_oz`: enumerate the catalog via
+/// `opencode models`, present a multi-column table with tab-
+/// completion, default to `opencode/qwen3.6-plus-free` (the
+/// fastest measured option), prompt for timeout.
+fn collect_opencode(theme: &ColorfulTheme) -> Result<(toml::Table, Box<dyn LlmBackend>)> {
+    let model = match fetch_opencode_models() {
+        Ok(models) if !models.is_empty() => choose_opencode_model_from_list(theme, &models)?,
+        Ok(_) => {
+            println!("  ⚠ `opencode models` returned an empty catalog; falling back to free-text.");
+            free_text_opencode_model(theme)?
+        }
+        Err(e) => {
+            println!("  ⚠ couldn't enumerate opencode models ({e:#}); falling back to free-text.");
+            free_text_opencode_model(theme)?
+        }
+    };
+
+    let timeout_secs = prompt_timeout(theme, DEFAULT_TIMEOUT_OPENCODE)?;
+
+    let backend =
+        OpencodeCliBackend::new(model.clone()).with_timeout(Duration::from_secs(timeout_secs));
+
+    let mut t = toml::Table::new();
+    t.insert("backend".into(), toml::Value::String("opencode".into()));
+    t.insert("model".into(), toml::Value::String(model));
+    t.insert(
+        "timeout_secs".into(),
+        toml::Value::Integer(timeout_secs as i64),
+    );
+    Ok((t, Box::new(backend)))
+}
+
+/// Default model id when the wizard can't compute a smarter pick.
+/// Measured 3.06s P50 on 2026-05-15 with correct routing replies.
+/// Free-tier so no plan surprises.
+const OPENCODE_DEFAULT_MODEL: &str = "opencode/qwen3.6-plus-free";
+
+fn choose_opencode_model_from_list(theme: &ColorfulTheme, models: &[String]) -> Result<String> {
+    print_models_table(models);
+
+    let completion = ModelCompletion {
+        models: models.to_vec(),
+    };
+    let default = if models.iter().any(|m| m == OPENCODE_DEFAULT_MODEL) {
+        OPENCODE_DEFAULT_MODEL.to_string()
+    } else if let Some(free) = models.iter().find(|m| m.contains("-free")) {
+        // Forward-compat: if the canonical default rotates out of
+        // the catalog, prefer any other free-tier model so the
+        // wizard's "easy default" semantics still hold.
+        free.clone()
+    } else {
+        models[0].clone()
+    };
+    let raw: String = Input::with_theme(theme)
+        .with_prompt(format!(
+            "opencode model ({} available — Tab completes)",
+            models.len()
+        ))
+        .default(default)
+        .completion_with(&completion)
+        .interact_text()?;
+    Ok(normalize_user_input(&raw))
+}
+
+fn free_text_opencode_model(theme: &ColorfulTheme) -> Result<String> {
+    println!("  ℹ Pick a model id that `opencode` accepts.");
+    println!("    Run `opencode models` to see the current set.");
+    let raw: String = Input::with_theme(theme)
+        .with_prompt("opencode model id (e.g. opencode/qwen3.6-plus-free)")
+        .default(OPENCODE_DEFAULT_MODEL.to_string())
+        .interact_text()?;
+    Ok(normalize_user_input(&raw))
+}
+
+/// Spawn `opencode models` and return the list of `provider/model`
+/// ids. The CLI emits one id per line; we trim, drop blanks, and
+/// hand back. Any subprocess failure or empty output → `Err`, the
+/// caller degrades to free-text Input.
+fn fetch_opencode_models() -> Result<Vec<String>> {
+    let output = Command::new("opencode")
+        .arg("models")
+        .output()
+        .context("spawning `opencode models`")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!(
+            "`opencode models` exited {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+    let stdout = String::from_utf8(output.stdout).context("opencode stdout was not utf-8")?;
+    let models = parse_opencode_models(&stdout);
+    if models.is_empty() {
+        Err(anyhow!("opencode models returned no usable ids"))
+    } else {
+        Ok(models)
+    }
+}
+
+/// Parse the newline-delimited `provider/model` shape from
+/// `opencode models`. Exposed for testing the parser without
+/// invoking the binary.
+pub fn parse_opencode_models(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Centralised timeout-prompt helper. The Input default + the
+/// validator are identical across backends; only the suggested
+/// value (and thus the prompt text) differs. Extracted to keep
+/// `collect_*` symmetric.
+fn prompt_timeout(theme: &ColorfulTheme, default_secs: u64) -> Result<u64> {
+    let raw: String = Input::with_theme(theme)
+        .with_prompt("Timeout (seconds)")
+        .default(default_secs.to_string())
+        .validate_with(|s: &String| -> Result<(), &'static str> {
+            s.trim()
+                .parse::<u64>()
+                .map(|_| ())
+                .map_err(|_| "must be a non-negative integer")
+        })
+        .interact_text()?;
+    Ok(raw.trim().parse::<u64>().unwrap_or(default_secs))
 }
 
 /// Render the catalog as a multi-column table (so it doesn't show
@@ -553,6 +700,35 @@ mod tests {
     #[test]
     fn format_models_table_empty_input_returns_empty() {
         assert_eq!(format_models_table(&[], 80), "");
+    }
+
+    /// `parse_opencode_models` accepts the newline-delimited
+    /// `provider/model` shape emitted by `opencode models`. Pure
+    /// function — no subprocess needed to lock the contract.
+    #[test]
+    fn parse_opencode_models_accepts_real_shape() {
+        let stdout = "opencode/big-pickle\nopencode/deepseek-v4-flash-free\nopencode/minimax-m2.5-free\nopencode/nemotron-3-super-free\nopencode/qwen3.6-plus-free\nmistral/codestral-latest\nmistral/devstral-2512\n";
+        let models = parse_opencode_models(stdout);
+        assert_eq!(models.len(), 7);
+        assert_eq!(models[0], "opencode/big-pickle");
+        assert_eq!(models[4], "opencode/qwen3.6-plus-free");
+        assert!(models.iter().any(|m| m == "mistral/codestral-latest"));
+    }
+
+    #[test]
+    fn parse_opencode_models_drops_blank_lines_and_trims() {
+        let stdout = "\n  opencode/qwen3.6-plus-free  \n\n\topencode/big-pickle\n\n";
+        let models = parse_opencode_models(stdout);
+        assert_eq!(
+            models,
+            vec!["opencode/qwen3.6-plus-free", "opencode/big-pickle"]
+        );
+    }
+
+    #[test]
+    fn parse_opencode_models_empty_input_returns_empty() {
+        assert!(parse_opencode_models("").is_empty());
+        assert!(parse_opencode_models("\n\n\n").is_empty());
     }
 
     /// An empty-but-valid array returns Err (no usable ids).

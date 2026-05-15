@@ -244,6 +244,75 @@ fn dispatcher_fallback_renders_nested_headers_with_full_prefix() {
         .expect("build_llm_stage accepts nested-headers wizard output");
 }
 
+/// A wizard-shaped opencode block (spec 0016) round-trips
+/// through render → write → load → `build_llm_stage`. Same
+/// envelope as the existing oz round-trip below.
+#[test]
+fn opencode_block_round_trips_through_config_load() {
+    let mut cfg = JarvisConfig::default();
+    let mut t = toml::Table::new();
+    t.insert("backend".into(), toml::Value::String("opencode".into()));
+    t.insert(
+        "model".into(),
+        toml::Value::String("opencode/qwen3.6-plus-free".into()),
+    );
+    t.insert("timeout_secs".into(), toml::Value::Integer(15));
+    cfg.dispatcher.fallback = Some(toml::Value::Table(t));
+
+    let rendered = setup::render_config(&cfg).expect("render");
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, rendered).unwrap();
+
+    let reloaded = config::load(&path).expect("config::load");
+    let fb = reloaded.dispatcher.fallback.expect("fallback present");
+    let table = fb.as_table().unwrap();
+    assert_eq!(
+        table.get("backend").and_then(|v| v.as_str()),
+        Some("opencode")
+    );
+    assert_eq!(
+        table.get("model").and_then(|v| v.as_str()),
+        Some("opencode/qwen3.6-plus-free")
+    );
+    assert_eq!(
+        table.get("timeout_secs").and_then(|v| v.as_integer()),
+        Some(15)
+    );
+    jarvis::dispatcher::llm::build_llm_stage(&toml::Value::Table(table.clone()))
+        .expect("build_llm_stage accepts opencode wizard output");
+}
+
+/// Same round-trip for backend = "oz" after spec 0016's wizard
+/// parity update (timeout_secs is now collected explicitly). The
+/// 30s default flows from wizard → TOML → reloaded JarvisConfig
+/// → build_llm_stage without surprises.
+#[test]
+fn oz_block_with_timeout_round_trips_through_config_load() {
+    let mut cfg = JarvisConfig::default();
+    let mut t = toml::Table::new();
+    t.insert("backend".into(), toml::Value::String("oz".into()));
+    t.insert("model".into(), toml::Value::String("auto-efficient".into()));
+    t.insert("timeout_secs".into(), toml::Value::Integer(30));
+    cfg.dispatcher.fallback = Some(toml::Value::Table(t));
+
+    let rendered = setup::render_config(&cfg).expect("render");
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, rendered).unwrap();
+
+    let reloaded = config::load(&path).expect("config::load");
+    let fb = reloaded.dispatcher.fallback.expect("fallback present");
+    let table = fb.as_table().unwrap();
+    assert_eq!(table.get("backend").and_then(|v| v.as_str()), Some("oz"));
+    assert_eq!(
+        table.get("timeout_secs").and_then(|v| v.as_integer()),
+        Some(30)
+    );
+    jarvis::dispatcher::llm::build_llm_stage(&toml::Value::Table(table.clone()))
+        .expect("build_llm_stage accepts oz wizard output with timeout");
+}
+
 /// Skip path: `cfg.dispatcher.fallback = None` produces a rendered
 /// file with no `[dispatcher.fallback]` section. Important because
 /// the wizard's "stage 2 stays disabled" branch must result in a

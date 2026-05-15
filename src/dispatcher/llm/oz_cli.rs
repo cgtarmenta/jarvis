@@ -1,23 +1,40 @@
 //! Subprocess-driven classifier backed by Warp's `oz` CLI — spec
-//! 0013 / B-3.
+//! 0013 / B-3, updated by spec 0016.
 //!
-//! Spawns `oz agent run --model <model_id> --prompt <classifier
-//! prompt>`, reads stdout, and parses out the chosen worker id with
-//! the same [`super::parse_worker_id`] helper the HTTP backend uses.
-//! Stderr is captured and used to make error messages useful when
-//! the subprocess exits non-zero.
+//! Spawns `oz agent run --output-format json --model <model_id>
+//! --prompt <classifier prompt>`, reads the resulting NDJSON event
+//! stream from stdout, filters for `{"type":"agent","text":...}`
+//! events (the model's user-facing reply, distinct from
+//! `agent_reasoning` chain-of-thought and `system` run/conversation
+//! handles), concatenates their text fields, and parses the result
+//! with [`super::parse_worker_id`].
+//!
+//! **History.** The pre-spec-0016 invocation omitted
+//! `--output-format json` and parsed the human-readable stdout
+//! directly. That broke once the user actually exercised stage 2
+//! against a real account: the first line of `oz agent run`'s plain
+//! output is `Run ID: <uuid>`, which `parse_worker_id` would
+//! extract as the worker id (none match → cascade fell through
+//! every time). Spec 0016's bench also surfaced that the real
+//! per-call latency is 8-15s, not 5s — so the default timeout was
+//! lifted from 5s to 30s.
 //!
 //! Wire contract this backend assumes (mirrors `oz`'s documented
 //! CLI surface):
 //!
 //! - Binary is named `oz` by default, resolvable on PATH; users with
 //!   custom installs override via [`OzCliBackend::with_binary`].
-//! - Argv shape: `oz agent run --model <model> --prompt <prompt>`.
-//!   The prompt comes through as a single argv element (no shell
-//!   interpolation, so newlines / quotes inside don't matter).
-//! - Stdout contains the model's reply. We extract the *first*
-//!   whitespace-delimited token as the worker id; chatty replies
-//!   that lead with the id then add commentary still work.
+//! - Argv shape: `oz agent run --output-format json --model <model>
+//!   --prompt <prompt>`. The prompt comes through as a single argv
+//!   element (no shell interpolation, so newlines / quotes inside
+//!   don't matter).
+//! - Stdout is a newline-delimited stream of JSON events. We only
+//!   care about `{"type":"agent","text":...}`; everything else
+//!   (`system`/`agent_reasoning`/unknown shapes) is ignored.
+//! - If no `agent` events surfaced before the subprocess exited
+//!   (e.g. a reasoning model that timed out internally and only
+//!   emitted `agent_reasoning`), we return `Ok(None)` — the
+//!   documented decline path in [`LlmBackend`].
 //! - Non-zero exit code → backend error. Includes a stderr snippet
 //!   so `jarvis dispatcher status` (future) and tracing fields show
 //!   *why* the call failed.
@@ -41,9 +58,12 @@ use anyhow::{Context, Result, anyhow};
 
 use super::{LlmBackend, WorkerInfo, default_classifier_prompt, parse_worker_id};
 
-/// Default per-call timeout. Same 5s the HTTP backend uses; voice-
-/// turn latency budget is shared between both.
-const DEFAULT_TIMEOUT_SECS: u64 = 5;
+/// Default per-call timeout. Sized for `oz`'s realistic classifier
+/// latency profile measured 2026-05-15: P50 ≈ 8s, P95 ≈ 15s across
+/// the catalog. 30s leaves 2x P95 headroom without locking the
+/// cascade out for unbounded time. Users who want a tighter ceiling
+/// override via `timeout_secs` in `[dispatcher.fallback]`.
+const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 /// `oz` subprocess classifier.
 ///
@@ -103,6 +123,8 @@ impl LlmBackend for OzCliBackend {
         cmd.args([
             "agent",
             "run",
+            "--output-format",
+            "json",
             "--model",
             &self.model,
             "--prompt",
@@ -184,7 +206,55 @@ impl LlmBackend for OzCliBackend {
         }
 
         let stdout = String::from_utf8_lossy(&stdout_buf);
-        Ok(parse_worker_id(&stdout))
+        match extract_agent_text(&stdout) {
+            Some(reply) => Ok(parse_worker_id(&reply)),
+            None => Ok(None),
+        }
+    }
+}
+
+/// Extract the model's user-facing reply from `oz agent run
+/// --output-format json` NDJSON output.
+///
+/// The stream interleaves three relevant event types:
+/// - `{"type":"system",...}` — handles (run id, conversation id).
+/// - `{"type":"agent_reasoning","text":"..."}` — chain-of-thought.
+/// - `{"type":"agent","text":"..."}` — the final user-facing reply.
+///
+/// We concatenate the `text` fields of every `agent` event (some
+/// models emit one, some stream multiple chunks) and return the
+/// result. If no `agent` events appeared at all — common when a
+/// reasoning model exhausts its thinking budget — we return `None`
+/// so the cascade falls through to stage 3.
+///
+/// Malformed lines (not valid JSON, missing `type` field, wrong
+/// shape) are silently skipped: oz sometimes prefixes the stream
+/// with non-JSON banner text and we don't want to abort the whole
+/// parse over it.
+pub(crate) fn extract_agent_text(stdout: &str) -> Option<String> {
+    let mut chunks: Vec<String> = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(event_type) = value.get("type").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if event_type != "agent" {
+            continue;
+        }
+        if let Some(text) = value.get("text").and_then(|v| v.as_str()) {
+            chunks.push(text.to_string());
+        }
+    }
+    if chunks.is_empty() {
+        None
+    } else {
+        Some(chunks.concat())
     }
 }
 
@@ -245,12 +315,36 @@ mod tests {
         }
     }
 
-    /// Happy path: the fixture echoes a worker id on stdout; backend
-    /// extracts and returns it.
+    /// Helper to write a fixture script that emits a canned JSON
+    /// stream as `oz agent run --output-format json` would. Each
+    /// event becomes one stdout line.
+    fn json_stream_script(events: &[&str]) -> String {
+        let mut body = String::new();
+        for e in events {
+            // Single-quote the JSON inside the shell echo. The
+            // events themselves don't contain single quotes in
+            // these fixtures; if they do later, we'll escape.
+            body.push_str(&format!("echo '{e}'\n"));
+        }
+        body
+    }
+
+    /// Happy path: oz's NDJSON stream includes the run handle, the
+    /// conversation handle, and a single `agent` event with the
+    /// model's reply. Backend filters to the agent event and parses
+    /// the worker id from its text.
     #[test]
-    fn classify_extracts_worker_id_from_stdout() {
+    fn classify_extracts_worker_id_from_agent_event() {
         let tmp = TempDir::new().unwrap();
-        let bin = fixture(tmp.path(), "oz-mock", "echo time");
+        let bin = fixture(
+            tmp.path(),
+            "oz-mock",
+            &json_stream_script(&[
+                r#"{"type":"system","event_type":"run_started","run_id":"abc"}"#,
+                r#"{"type":"system","event_type":"conversation_started","conversation_id":"def"}"#,
+                r#"{"type":"agent","text":"time\n"}"#,
+            ]),
+        );
 
         let backend = OzCliBackend::new("test-model").with_binary(bin.to_string_lossy());
         let result = backend
@@ -259,12 +353,16 @@ mod tests {
         assert_eq!(result.as_deref(), Some("time"));
     }
 
-    /// Fixture echoes `none` → maps to `Ok(None)` so the cascade
-    /// falls through to stage 3.
+    /// An `agent` event whose text is the decline sentinel maps to
+    /// `Ok(None)` so the cascade falls through to stage 3.
     #[test]
     fn classify_decline_yields_none() {
         let tmp = TempDir::new().unwrap();
-        let bin = fixture(tmp.path(), "oz-mock", "echo none");
+        let bin = fixture(
+            tmp.path(),
+            "oz-mock",
+            &json_stream_script(&[r#"{"type":"agent","text":"none"}"#]),
+        );
 
         let backend = OzCliBackend::new("test-model").with_binary(bin.to_string_lossy());
         let result = backend
@@ -273,15 +371,19 @@ mod tests {
         assert!(result.is_none());
     }
 
-    /// Chatty replies that put the id first plus commentary after
-    /// still resolve. Real models do this even when told not to.
+    /// Reasoning-heavy models (`*-opus`, `gpt-5-*`) tend to put the
+    /// id first then keep talking. The agent event's full text gets
+    /// passed to `parse_worker_id`, which already tolerates
+    /// trailing commentary.
     #[test]
     fn classify_tolerates_chatty_reply() {
         let tmp = TempDir::new().unwrap();
         let bin = fixture(
             tmp.path(),
             "oz-mock",
-            "echo 'task-list  -- that is the best match'",
+            &json_stream_script(&[
+                r#"{"type":"agent","text":"task-list  -- that is the best match"}"#,
+            ]),
         );
 
         let backend = OzCliBackend::new("test-model").with_binary(bin.to_string_lossy());
@@ -289,6 +391,100 @@ mod tests {
             .classify("qué tareas tengo", &[worker("task-list", None)])
             .unwrap();
         assert_eq!(result.as_deref(), Some("task-list"));
+    }
+
+    /// Some models stream the reply in multiple `agent` events
+    /// (e.g. when oz fragments long outputs). The parser
+    /// concatenates them in order.
+    #[test]
+    fn classify_concatenates_multiple_agent_events() {
+        let tmp = TempDir::new().unwrap();
+        let bin = fixture(
+            tmp.path(),
+            "oz-mock",
+            &json_stream_script(&[
+                r#"{"type":"system","event_type":"run_started","run_id":"x"}"#,
+                r#"{"type":"agent","text":"task"}"#,
+                r#"{"type":"agent","text":"-list"}"#,
+                r#"{"type":"agent","text":"\n"}"#,
+            ]),
+        );
+
+        let backend = OzCliBackend::new("test-model").with_binary(bin.to_string_lossy());
+        let result = backend
+            .classify("qué tareas tengo", &[worker("task-list", None)])
+            .unwrap();
+        assert_eq!(result.as_deref(), Some("task-list"));
+    }
+
+    /// Stream with only `agent_reasoning` events (model exhausted
+    /// thinking budget without surfacing a final reply) → `Ok(None)`.
+    /// Cascade falls through to stage 3 instead of routing on
+    /// chain-of-thought text.
+    #[test]
+    fn classify_yields_none_when_only_reasoning_emitted() {
+        let tmp = TempDir::new().unwrap();
+        let bin = fixture(
+            tmp.path(),
+            "oz-mock",
+            &json_stream_script(&[
+                r#"{"type":"system","event_type":"run_started","run_id":"x"}"#,
+                r#"{"type":"agent_reasoning","text":"Deciding..."}"#,
+                r#"{"type":"agent_reasoning","text":"Probably time, but let me think more."}"#,
+            ]),
+        );
+
+        let backend = OzCliBackend::new("test-model").with_binary(bin.to_string_lossy());
+        let result = backend
+            .classify("qué hora es", &[worker("time", None)])
+            .unwrap();
+        assert!(result.is_none(), "no agent events → should decline");
+    }
+
+    /// Pure-function tests of the event-stream parser. Locks the
+    /// contract without spawning subprocesses for each case.
+    #[test]
+    fn extract_agent_text_handles_real_world_shapes() {
+        // Real shape captured from `oz agent run --output-format
+        // json` on 2026-05-15 against auto-efficient.
+        let stdout = r#"{"type":"system","event_type":"run_started","run_id":"019e2c16-71c1-701c-bb10-15be28a43300","run_url":"https://oz.warp.dev/runs/019e2c16-71c1-701c-bb10-15be28a43300"}
+{"type":"system","event_type":"conversation_started","conversation_id":"c3bc6c55-c98a-493c-9b40-b23dfb6f446b"}
+{"type":"agent","text":"time\n"}
+"#;
+        assert_eq!(extract_agent_text(stdout), Some("time\n".to_string()));
+    }
+
+    #[test]
+    fn extract_agent_text_filters_reasoning_keeps_agent() {
+        // Real shape captured from kimi-k25-fireworks: emits both
+        // agent_reasoning and agent events. We want only the latter.
+        let stdout = r#"{"type":"system","event_type":"run_started","run_id":"x"}
+{"type":"agent_reasoning","text":"The user is asking..."}
+{"type":"agent","text":"time\n"}
+"#;
+        assert_eq!(extract_agent_text(stdout), Some("time\n".to_string()));
+    }
+
+    #[test]
+    fn extract_agent_text_returns_none_on_empty_or_reasoning_only() {
+        assert_eq!(extract_agent_text(""), None);
+        assert_eq!(extract_agent_text("\n\n\n"), None);
+        assert_eq!(
+            extract_agent_text(
+                r#"{"type":"system","event_type":"run_started","run_id":"x"}
+{"type":"agent_reasoning","text":"thinking..."}
+"#
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn extract_agent_text_tolerates_malformed_lines() {
+        // A banner line that isn't JSON shouldn't kill the parse;
+        // the agent event after it still gets through.
+        let stdout = "not json at all\n{not even close}\n{\"type\":\"agent\",\"text\":\"time\"}\n";
+        assert_eq!(extract_agent_text(stdout), Some("time".to_string()));
     }
 
     /// Non-zero exit → backend error mentioning the binary name and
@@ -325,20 +521,22 @@ mod tests {
 
     /// Argv passes prompt as a single element so newlines / quotes
     /// inside the classifier prompt don't break the call. Fixture
-    /// here echoes argv[6] (the prompt) so we can assert it
-    /// round-trips intact.
+    /// echoes argv[$8] (the prompt) so we can assert it round-
+    /// trips intact. Argv index shifted from $6 → $8 by spec 0016
+    /// inserting `--output-format json` ahead of `--model`.
     #[test]
     fn classify_passes_prompt_as_argv_intact() {
         let tmp = TempDir::new().unwrap();
-        // argv layout: $0 (script) agent run --model M --prompt P
-        // → script sees argv[1..6] = [agent, run, --model, M,
-        //   --prompt, P]; we want $6 = P. Print "time" first so the
-        //   id parses, then a delimiter, then $6 so the test can
-        //   inspect it.
+        // argv layout: $0 (script) agent run --output-format json
+        // --model M --prompt P → script sees argv[1..8] = [agent,
+        // run, --output-format, json, --model, M, --prompt, P];
+        // $8 is the prompt. Emit a valid agent JSON event so the
+        // happy-path assertion still passes, then echo $8 for
+        // visibility (the parser ignores non-JSON lines).
         let bin = fixture(
             tmp.path(),
             "oz-mock",
-            "echo time\necho ==DELIM==\nprintf '%s' \"$6\"",
+            "echo '{\"type\":\"agent\",\"text\":\"time\"}'\necho ==DELIM==\nprintf '%s' \"$8\"",
         );
 
         let backend = OzCliBackend::new("M").with_binary(bin.to_string_lossy());
@@ -350,12 +548,12 @@ mod tests {
             .unwrap();
         assert_eq!(result.as_deref(), Some("time"));
 
-        // Re-run with a fixture that echoes argv[6] (the prompt)
+        // Re-run with a fixture that echoes argv[$8] (the prompt)
         // to stderr and exits non-zero. The round-tripped prompt
         // shows up in the backend's error message, which is the
         // only externally-observable surface for the *body* of
         // what got passed in argv.
-        let bin2 = fixture(tmp.path(), "oz-fail-echo", "printf '%s' \"$6\" >&2\nexit 1");
+        let bin2 = fixture(tmp.path(), "oz-fail-echo", "printf '%s' \"$8\" >&2\nexit 1");
         let backend = OzCliBackend::new("M").with_binary(bin2.to_string_lossy());
         let err = backend
             .classify(

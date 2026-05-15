@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use tracing::warn;
 
-use super::{LlmBackend, OpenAiCompatBackend, OzCliBackend, WorkerInfo};
+use super::{LlmBackend, OpenAiCompatBackend, OpencodeCliBackend, OzCliBackend, WorkerInfo};
 use crate::dispatcher::{DispatchDecision, Dispatcher};
 use crate::session::Session;
 use crate::workers::WorkerRegistry;
@@ -251,10 +251,11 @@ pub fn build_llm_stage(raw: &toml::Value) -> Result<LlmDispatcher> {
     let llm: Box<dyn LlmBackend> = match backend {
         "openai_compat" => Box::new(build_openai_compat(table)?),
         "oz" => Box::new(build_oz_cli(table)?),
+        "opencode" => Box::new(build_opencode_cli(table)?),
         other => {
             return Err(anyhow::anyhow!(
                 "[dispatcher.fallback].backend = {other:?} is unknown; \
-                 expected \"openai_compat\" or \"oz\""
+                 expected \"openai_compat\", \"oz\", or \"opencode\""
             ));
         }
     };
@@ -336,6 +337,26 @@ fn build_oz_cli(table: &toml::Table) -> Result<OzCliBackend> {
     let timeout = read_optional_u64(table, "timeout_secs")?.map(Duration::from_secs);
 
     let mut backend = OzCliBackend::new(model);
+    if let Some(b) = binary {
+        backend = backend.with_binary(b);
+    }
+    if let Some(t) = timeout {
+        backend = backend.with_timeout(t);
+    }
+    Ok(backend)
+}
+
+/// Mirror of `build_oz_cli` for the opencode backend (spec 0016).
+/// Same surface: required `model` (provider/model), optional
+/// `binary` override, optional `timeout_secs`. The fast-default
+/// path is wizard-driven (`opencode/qwen3.6-plus-free`); here we
+/// just plumb whatever the user wrote in TOML.
+fn build_opencode_cli(table: &toml::Table) -> Result<OpencodeCliBackend> {
+    let model = read_string(table, "model")?;
+    let binary = read_optional_string(table, "binary")?;
+    let timeout = read_optional_u64(table, "timeout_secs")?.map(Duration::from_secs);
+
+    let mut backend = OpencodeCliBackend::new(model);
     if let Some(b) = binary {
         backend = backend.with_binary(b);
     }
@@ -698,6 +719,33 @@ mod tests {
         assert_eq!(dispatcher.backend_name(), "oz");
     }
 
+    /// `build_llm_stage` accepts a minimal opencode config
+    /// (spec 0016). Required field: `model` in the
+    /// `provider/model` shape opencode itself accepts.
+    #[test]
+    fn build_llm_stage_opencode_minimal() {
+        let raw = toml::toml! {
+            backend = "opencode"
+            model = "opencode/qwen3.6-plus-free"
+        };
+        let dispatcher = build_llm_stage(&toml::Value::Table(raw)).expect("should build");
+        assert_eq!(dispatcher.backend_name(), "opencode");
+    }
+
+    /// `build_llm_stage` accepts an opencode config with binary +
+    /// timeout overrides — same option surface as oz.
+    #[test]
+    fn build_llm_stage_opencode_full() {
+        let raw = toml::toml! {
+            backend = "opencode"
+            model = "opencode/big-pickle"
+            binary = "/usr/local/bin/opencode"
+            timeout_secs = 20
+        };
+        let dispatcher = build_llm_stage(&toml::Value::Table(raw)).expect("should build");
+        assert_eq!(dispatcher.backend_name(), "opencode");
+    }
+
     /// `build_llm_stage` errors on a missing `backend` field with a
     /// message naming the section.
     #[test]
@@ -723,7 +771,7 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("magic-router"), "got: {msg}");
         assert!(
-            msg.contains("openai_compat") && msg.contains("oz"),
+            msg.contains("openai_compat") && msg.contains("oz") && msg.contains("opencode"),
             "got: {msg}"
         );
     }
