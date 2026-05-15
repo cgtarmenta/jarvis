@@ -46,7 +46,7 @@ thiserror = "1.0"
 which = "6.0"
 
 # SIGINT/SIGTERM handling for the daemon.
-signal-hook = "0.3"
+signal-hook = "0.4"
 
 # Tempfile for WAV captures.
 tempfile = "3.10"
