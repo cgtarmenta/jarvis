@@ -100,6 +100,47 @@ Out of scope:
 
 ## Journal
 
+- 2026-05-16: post-verification hardening (A+B).
+  - **Trigger**: live sandbox test revealed two ways the handler
+    could lie about success. (1) STT delivered "Abre Firefox.
+    No está abierto." and the matcher captured the whole tail
+    including the second sentence — `xdg-open` was then handed
+    "firefox no esta sonando no esta abierto" as a single
+    argument. (2) Stage-2 (opencode) misrouted the complaint
+    "Jarvis, Firefox no está sonando. No está abierto." to
+    `app-launcher`, whose `invoke` happily passed the whole
+    sentence to `xdg-open`. Both paths reported "Listo, abrí …"
+    even though nothing launched.
+  - **Fix A — clause-boundary trim.** `clip_to_clause` cuts the
+    prompt at the first `.,!?;:\n` before normalisation, so
+    follow-on clauses never reach the launcher. Applied at both
+    `recognize` (stage-1) and `invoke` (stage-2 defense).
+    `looks_like_app_name` rejects anything outside 1–4 words /
+    60 chars. `invoke` also detects "no trigger AND we discarded
+    real words" — the stage-2 misrouted-sentence shape — and
+    refuses with "No entendí qué app abrir.".
+  - **Fix B — verify spawn survived.** `spawn_linux` and
+    `spawn_macos` now sleep 150 ms after `spawn()` and call
+    `try_wait()`. An immediate non-zero exit (binary-not-found
+    by direct exec, xdg-open exit 3 "no handler", display
+    socket missing) demotes the result from success to
+    `LaunchError::NotFound` / `LaunchError::Other`, which
+    drives the friendly Spanish failure TTS instead of a
+    confident lie. xdg-open exit 0 still counts as success
+    (best effort — it doesn't tell us whether the registered
+    handler actually rendered).
+  - **Tests**: six new cases covering clause-boundary clipping,
+    long-sentence decline at `recognize`, stage-2 sentence
+    refusal at `invoke`, trigger-stripping when stage-2 hands
+    us the raw "abre Firefox", and the `looks_like_app_name`
+    bounds. Suite: **301 unit + 11 integration + others**, all
+    green. `cargo fmt` clean.
+  - **Manual verification still pending.** Sandbox re-test
+    should happen against a systemd-user-started daemon so the
+    `WAYLAND_DISPLAY` env we observed missing on 2026-05-16
+    isn't a confounder. Same envelope as the original 2026-05-15
+    journal: ship-move follows green manual run.
+
 - 2026-05-15: implementation landed across three slices.
   - **A. Handler module.** New `src/handlers/app_launcher.rs`:
     `AppLauncherHandler` implementing `IntentMatcher` +

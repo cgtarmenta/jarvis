@@ -25,6 +25,7 @@
 
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use anyhow::Result;
 
@@ -206,13 +207,15 @@ impl IntentMatcher for AppLauncherHandler {
     }
 
     fn recognize(&self, prompt: &str, _session: &Session) -> Option<String> {
-        let n = normalise(prompt);
+        // Cut at first clause boundary so "abre Firefox, no está sonando"
+        // resolves to "firefox" instead of dragging the whole follow-up
+        // into the launch argument.
+        let head = clip_to_clause(prompt);
+        let n = normalise(head);
         for t in LAUNCH_TRIGGERS {
             if let Some(tail) = n.strip_prefix(t) {
                 let tail = tail.trim();
-                if !tail.is_empty() {
-                    // Pass the *tail* as the resolved prompt so
-                    // invoke doesn't have to re-strip the trigger.
+                if !tail.is_empty() && looks_like_app_name(tail) {
                     return Some(tail.to_string());
                 }
             }
@@ -238,13 +241,37 @@ impl WorkerHandle for AppLauncherHandler {
     }
 
     fn invoke(&self, ctx: &WorkerInvocation<'_>) -> Result<WorkerResponse> {
-        // `recognize` already stripped the trigger; `prompt` here
-        // is the raw app tail. Strip trailing punctuation so
-        // "abre Firefox." resolves to "firefox".
-        let tail = ctx
-            .prompt
+        // Stage-1 hands us the resolved tail (already trigger-stripped).
+        // Stage-2 (LLM dispatcher) hands us the raw user turn — opencode
+        // sometimes misroutes complaints like "Firefox no está sonando"
+        // here. Trim at the first clause boundary, drop the trigger
+        // prefix if present, and bail with a friendly message when the
+        // residue doesn't look like a bare app name.
+        let raw = ctx.prompt.trim();
+        let head = clip_to_clause(raw);
+        let stripped = strip_trigger(head);
+        let had_trigger = stripped.len() < head.len();
+        let tail = stripped
             .trim()
             .trim_end_matches(['.', '?', '!', '¿', '¡', ',']);
+        // If we never matched a trigger AND clip_to_clause discarded
+        // real words after the boundary, the prompt was a multi-clause
+        // sentence misrouted to us — refuse rather than try to launch
+        // the first noun we see (e.g. "Jarvis, Firefox no está sonando").
+        // A bare trailing period on "Firefox." doesn't count.
+        let discarded_has_words = raw[head.len()..].chars().any(|c| c.is_alphanumeric());
+        if !had_trigger && discarded_has_words {
+            return Ok(WorkerResponse {
+                text: "No entendí qué app abrir.".to_string(),
+                captured_session_id: None,
+            });
+        }
+        if !looks_like_app_name(tail) {
+            return Ok(WorkerResponse {
+                text: "No entendí qué app abrir.".to_string(),
+                captured_session_id: None,
+            });
+        }
         let resolved = self.resolve(tail);
 
         if is_refused(&resolved) {
@@ -289,6 +316,51 @@ enum LaunchError {
     Other(String),
 }
 
+/// Cap on how long we wait after spawn before deciding the child
+/// survived. Binary-not-found and immediate display-socket failures
+/// exit in <10ms; 150ms is comfortably above the noise and below
+/// human-perceptible TTS lag.
+const SPAWN_VERIFY_DELAY: Duration = Duration::from_millis(150);
+
+/// Cut `prompt` at the first sentence/clause-boundary character so
+/// follow-on clauses don't get dragged into the launch argument.
+fn clip_to_clause(prompt: &str) -> &str {
+    let mut end = prompt.len();
+    for (i, c) in prompt.char_indices() {
+        if matches!(c, '.' | ',' | '!' | '?' | ';' | '\n' | ':') {
+            end = i;
+            break;
+        }
+    }
+    &prompt[..end]
+}
+
+/// If `s` starts with a known launch trigger (e.g. "abre "), return
+/// the tail; otherwise return `s` unchanged. Used by `invoke` to
+/// normalise both stage-1 ("firefox") and stage-2 ("abre firefox")
+/// prompt shapes into a bare app name.
+fn strip_trigger(s: &str) -> &str {
+    let n_lower = s.trim_start().to_ascii_lowercase();
+    for t in LAUNCH_TRIGGERS {
+        if let Some(stripped) = n_lower.strip_prefix(t) {
+            let strip_len = s.len() - stripped.len();
+            return &s[strip_len..];
+        }
+    }
+    s
+}
+
+/// A real app name is short and unpunctuated. Anything longer than
+/// 4 words or 60 chars is almost certainly a misrouted complaint
+/// from stage-2, not "open Firefox".
+fn looks_like_app_name(s: &str) -> bool {
+    if s.is_empty() || s.len() > 60 {
+        return false;
+    }
+    let words = s.split_whitespace().count();
+    (1..=4).contains(&words)
+}
+
 /// Spawn the resolved binary through the chosen backend. The
 /// child is dropped immediately (fire-and-forget) — the launched
 /// app inherits the daemon's environment, which is usually what
@@ -313,27 +385,42 @@ fn launch(backend: &Backend, resolved: &str) -> Result<(), LaunchError> {
 
 fn spawn_linux(resolved: &str) -> Result<(), LaunchError> {
     // Try xdg-open first — handles `.desktop`-registered apps by
-    // their friendly name (e.g. `firefox.desktop` even when the
-    // binary lives somewhere weird). If xdg-open isn't present
-    // (rare), fall back to direct exec.
-    let xdg_attempt = Command::new("xdg-open")
+    // their friendly name. If it spawns but exits non-zero within
+    // SPAWN_VERIFY_DELAY (e.g. exit 3 = "no handler for argument"),
+    // fall back to direct exec so we can give a real error rather
+    // than a confident "Listo, abrí <garbage>".
+    if let Ok(mut child) = Command::new("xdg-open")
         .arg(resolved)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn();
-    if xdg_attempt.is_ok() {
-        return Ok(());
+        .spawn()
+    {
+        std::thread::sleep(SPAWN_VERIFY_DELAY);
+        match child.try_wait() {
+            Ok(Some(status)) if !status.success() => {
+                // xdg-open declined — fall through to direct exec.
+            }
+            _ => return Ok(()),
+        }
     }
 
-    // xdg-open missing or failed to spawn — try direct exec.
     match Command::new(resolved)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
     {
-        Ok(_) => Ok(()),
+        Ok(mut child) => {
+            std::thread::sleep(SPAWN_VERIFY_DELAY);
+            match child.try_wait() {
+                Ok(Some(status)) if !status.success() => Err(LaunchError::Other(format!(
+                    "salió con código {}",
+                    status.code().unwrap_or(-1)
+                ))),
+                _ => Ok(()),
+            }
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(LaunchError::NotFound),
         Err(e) => Err(LaunchError::Other(e.to_string())),
     }
@@ -347,7 +434,16 @@ fn spawn_macos(resolved: &str) -> Result<(), LaunchError> {
         .stderr(Stdio::null())
         .spawn()
     {
-        Ok(_) => Ok(()),
+        Ok(mut child) => {
+            std::thread::sleep(SPAWN_VERIFY_DELAY);
+            match child.try_wait() {
+                Ok(Some(status)) if !status.success() => Err(LaunchError::Other(format!(
+                    "salió con código {}",
+                    status.code().unwrap_or(-1)
+                ))),
+                _ => Ok(()),
+            }
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(LaunchError::NotFound),
         Err(e) => Err(LaunchError::Other(e.to_string())),
     }
@@ -648,5 +744,122 @@ mod tests {
     fn ids_match_across_traits() {
         let h = handler();
         assert_eq!(IntentMatcher::worker_id(&h), WorkerHandle::id(&h));
+    }
+
+    /// Clause-boundary cut: a comma or period after the app name
+    /// must not drag follow-on text into the launch argument. Bug
+    /// observed 2026-05-16 — STT delivered "abre Firefox no está
+    /// sonando. No está abierto." which previously resolved to a
+    /// sentence-shaped binary name.
+    #[test]
+    fn recognize_clips_at_clause_boundary() {
+        let h = handler();
+        let s = Session::new();
+        for (prompt, expected) in [
+            ("Abre Firefox, no está sonando", "firefox"),
+            ("Abre Firefox. No está abierto", "firefox"),
+            ("abre vs code; please", "vs code"),
+            ("launch Firefox: now", "firefox"),
+        ] {
+            assert_eq!(
+                h.recognize(prompt, &s).as_deref(),
+                Some(expected),
+                "{prompt:?} should yield {expected:?}"
+            );
+        }
+    }
+
+    /// Recognise declines when the post-trigger tail looks
+    /// sentence-shaped (>4 words). Prevents the matcher from
+    /// claiming "open the door and tell me what time it is" as a
+    /// launch request.
+    #[test]
+    fn recognize_declines_sentence_shaped_tail() {
+        let h = handler();
+        let s = Session::new();
+        for prompt in [
+            "abre Firefox y luego cierra Chrome y limpia la pantalla porfa",
+            "open the door and tell me what time it is please",
+        ] {
+            assert!(
+                h.recognize(prompt, &s).is_none(),
+                "{prompt:?} should decline (too long to be an app name)"
+            );
+        }
+    }
+
+    /// Invoke refuses sentence-shaped prompts — the second line of
+    /// defense against stage-2 (LLM) dispatcher misrouting a
+    /// complaint like "Firefox no está sonando, no está abierto" to
+    /// app-launcher.
+    #[test]
+    fn invoke_refuses_misrouted_sentence_prompt() {
+        let h = handler();
+        for prompt in [
+            "Jarvis, Firefox no está sonando. No está abierto.",
+            "el navegador no está respondiendo desde hace un rato la verdad",
+            "qué tal el clima en madrid hoy por la tarde",
+        ] {
+            let resp = h
+                .invoke(&WorkerInvocation {
+                    prompt,
+                    session_id: None,
+                    cwd: None,
+                })
+                .expect("invoke succeeds");
+            assert!(
+                resp.text.starts_with("No entendí"),
+                "expected refusal for {prompt:?}, got: {:?}",
+                resp.text
+            );
+        }
+    }
+
+    /// Invoke accepts a stage-2 prompt that still carries the
+    /// launch trigger ("abre firefox") and strips it before
+    /// resolving. The earlier stage-1 path delivers a bare tail
+    /// ("firefox") which also still works — both shapes resolve.
+    #[test]
+    fn invoke_strips_trigger_from_stage2_prompt() {
+        let h = handler();
+        for prompt in ["abre Firefox", "Open Firefox", "Firefox"] {
+            let resp = h
+                .invoke(&WorkerInvocation {
+                    prompt,
+                    session_id: None,
+                    cwd: None,
+                })
+                .expect("invoke succeeds");
+            assert!(
+                resp.text.starts_with("Listo, abrí")
+                    && resp.text.to_lowercase().contains("firefox"),
+                "expected success for {prompt:?}, got: {:?}",
+                resp.text
+            );
+        }
+    }
+
+    /// `clip_to_clause` cuts at the first sentence/clause boundary
+    /// and otherwise returns the input unchanged.
+    #[test]
+    fn clip_to_clause_cuts_at_boundary() {
+        assert_eq!(clip_to_clause("abre firefox, ya"), "abre firefox");
+        assert_eq!(clip_to_clause("abre firefox. ya"), "abre firefox");
+        assert_eq!(clip_to_clause("abre firefox"), "abre firefox");
+        assert_eq!(clip_to_clause(""), "");
+    }
+
+    /// `looks_like_app_name` accepts 1–4-word inputs ≤60 chars and
+    /// rejects everything else.
+    #[test]
+    fn looks_like_app_name_bounds() {
+        assert!(looks_like_app_name("firefox"));
+        assert!(looks_like_app_name("vs code"));
+        assert!(looks_like_app_name("visual studio code"));
+        assert!(!looks_like_app_name(""));
+        assert!(!looks_like_app_name(
+            "this is way too many words for any sensible app name"
+        ));
+        assert!(!looks_like_app_name(&"a".repeat(61)));
     }
 }
